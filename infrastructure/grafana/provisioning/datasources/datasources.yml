@@ -1,0 +1,30 @@
+apiVersion: 1
+prune: true
+
+datasources:
+  - name: LossGuard PostgreSQL
+    uid: lossguard-postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_reader
+    secureJsonData:
+      password: grafana_read_only_local
+    jsonData:
+      database: lossguard
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 300
+
+  - name: LossGuard Prometheus
+    uid: lossguard-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: 5s

@@ -1,0 +1,3 @@
+evidently==0.7.21
+pandas>=2.2,<3
+psycopg[binary]>=3.2,<4

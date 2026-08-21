@@ -1,0 +1,39 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.log
+.ipynb_checkpoints/
+
+# Large/private source files and generated outputs
+dataset/
+archive*.zip
+SimulatedDataset.ipynb
+models/*.joblib
+reports/
+logs/
+
+# dbt and app state
+analytics/dbt/target/
+analytics/dbt/logs/
+analytics/dbt/dbt_packages/
+analytics/dbt/.user.yml
+.streamlit/secrets.toml
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

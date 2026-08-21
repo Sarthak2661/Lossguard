@@ -1,0 +1,20 @@
+version: 2
+
+sources:
+  - name: lossguard
+    schema: public
+    description: Transaction decisions written by the real-time consumer.
+    tables:
+      - name: scored_transactions
+        loaded_at_field: processed_at
+        columns:
+          - name: transaction_id
+            tests: [not_null, unique]
+          - name: event_time
+            tests: [not_null]
+          - name: decision
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [approve, verify, decline]

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,monitoring,notebook]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Check formatting
+        run: python -m ruff format --check .
+
+      - name: Run unit tests
+        run: python -m pytest
+
+      - name: Validate notebook structure
+        run: >-
+          python -c "import nbformat;
+          notebook=nbformat.read('notebooks/01_cost_sensitive_model.ipynb', as_version=4);
+          nbformat.validate(notebook)"
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet

@@ -1,0 +1,150 @@
+{
+  "model_version": "xgb-20260811T122124Z",
+  "created_at": "2026-08-11T12:21:24.484473+00:00",
+  "source": "dataset/fraudTrain.csv",
+  "rows": 300000,
+  "train_rows": 240000,
+  "validation_rows": 60000,
+  "train_fraud_rate": 0.007833333333333333,
+  "validation_fraud_rate": 0.00625,
+  "roc_auc": 0.9971931236897275,
+  "average_precision": 0.8839784661864346,
+  "best_f1_threshold": 0.9292128086090088,
+  "global_thresholds": {
+    "verify": 0.35000000000000003,
+    "decline": 0.95
+  },
+  "global_validation_cost": 18420.82,
+  "category_thresholds": {
+    "entertainment": {
+      "verify": 0.4,
+      "decline": 0.65,
+      "validation_cost": 176.95,
+      "validation_rows": 4350,
+      "validation_fraud_rows": 12
+    },
+    "food_dining": {
+      "verify": 0.37500000000000006,
+      "decline": 0.9,
+      "validation_cost": 615.02,
+      "validation_rows": 4247,
+      "validation_fraud_rows": 6
+    },
+    "gas_transport": {
+      "verify": 0.15,
+      "decline": 0.875,
+      "validation_cost": 267.95,
+      "validation_rows": 6201,
+      "validation_fraud_rows": 38
+    },
+    "grocery_net": {
+      "verify": 0.35000000000000003,
+      "decline": 0.95,
+      "validation_cost": 129.59,
+      "validation_rows": 2131,
+      "validation_fraud_rows": 8
+    },
+    "grocery_pos": {
+      "verify": 0.25,
+      "decline": 0.75,
+      "validation_cost": 201.54,
+      "validation_rows": 5986,
+      "validation_fraud_rows": 90
+    },
+    "health_fitness": {
+      "verify": 0.4,
+      "decline": 0.95,
+      "validation_cost": 414.6,
+      "validation_rows": 3783,
+      "validation_fraud_rows": 8
+    },
+    "home": {
+      "verify": 0.37500000000000006,
+      "decline": 0.95,
+      "validation_cost": 391.68,
+      "validation_rows": 5589,
+      "validation_fraud_rows": 6
+    },
+    "kids_pets": {
+      "verify": 0.4,
+      "decline": 0.95,
+      "validation_cost": 528.92,
+      "validation_rows": 5095,
+      "validation_fraud_rows": 15
+    },
+    "misc_net": {
+      "verify": 0.4,
+      "decline": 0.95,
+      "validation_cost": 1843.0,
+      "validation_rows": 2981,
+      "validation_fraud_rows": 34
+    },
+    "misc_pos": {
+      "verify": 0.4,
+      "decline": 0.85,
+      "validation_cost": 220.2,
+      "validation_rows": 3669,
+      "validation_fraud_rows": 13
+    },
+    "personal_care": {
+      "verify": 0.4,
+      "decline": 0.95,
+      "validation_cost": 529.72,
+      "validation_rows": 4117,
+      "validation_fraud_rows": 8
+    },
+    "shopping_net": {
+      "verify": 0.35000000000000003,
+      "decline": 0.95,
+      "validation_cost": 8496.32,
+      "validation_rows": 4601,
+      "validation_fraud_rows": 93
+    },
+    "shopping_pos": {
+      "verify": 0.07500000000000001,
+      "decline": 0.95,
+      "validation_cost": 3590.9,
+      "validation_rows": 5386,
+      "validation_fraud_rows": 36
+    },
+    "travel": {
+      "verify": 0.4,
+      "decline": 0.95,
+      "validation_cost": 274.94,
+      "validation_rows": 1864,
+      "validation_fraud_rows": 8
+    }
+  },
+  "feature_names": [
+    "amount",
+    "log_amount",
+    "distance_km",
+    "transaction_hour",
+    "transaction_day_of_week",
+    "customer_age",
+    "city_population",
+    "is_night",
+    "order_margin_pct",
+    "merchant_category_entertainment",
+    "merchant_category_food_dining",
+    "merchant_category_gas_transport",
+    "merchant_category_grocery_net",
+    "merchant_category_grocery_pos",
+    "merchant_category_health_fitness",
+    "merchant_category_home",
+    "merchant_category_kids_pets",
+    "merchant_category_misc_net",
+    "merchant_category_misc_pos",
+    "merchant_category_personal_care",
+    "merchant_category_shopping_net",
+    "merchant_category_shopping_pos",
+    "merchant_category_travel",
+    "channel_card_not_present",
+    "channel_card_present",
+    "customer_ltv_band_high",
+    "customer_ltv_band_low",
+    "customer_ltv_band_medium"
+  ],
+  "split_strategy": "first 80% train / last 20% validation after timestamp sort",
+  "cost_model": "docs/business-assumptions.md"
+}

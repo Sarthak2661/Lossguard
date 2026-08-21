@@ -1,0 +1,29 @@
+version: 2
+
+models:
+  - name: mart_daily_segment_kpis
+    description: One row per source transaction date and merchant category.
+    columns:
+      - name: metric_date
+        tests: [not_null]
+      - name: merchant_category
+        tests: [not_null]
+      - name: fraud_caught_value
+        description: Fraud amount prevented by declines plus the assumed 85% detected during verification.
+        tests: [not_null]
+      - name: fraud_missed_cost
+        description: Fraud loss remaining after the selected decision.
+        tests: [not_null]
+      - name: friction_cost
+        description: Verification operating cost plus modeled legitimate-customer friction.
+        tests: [not_null]
+      - name: normal_approval_value
+        description: Legitimate transaction volume approved without intervention.
+        tests: [not_null]
+  - name: mart_segment_kpis
+    description: Business cost and intervention KPIs by merchant category.
+    columns:
+      - name: merchant_category
+        tests: [not_null, unique]
+      - name: transaction_count
+        tests: [not_null]

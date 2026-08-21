@@ -1,0 +1,98 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Open business dashboard",
+      "type": "link",
+      "url": "http://localhost:8501",
+      "targetBlank": true
+    }
+  ],
+  "panels": [
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "lossguard-postgres"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-postgresql-datasource", "uid": "lossguard-postgres"},
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select $__timeGroupAlias(metric_time, '10s'), sum(metric_value) as \"Scored transactions\" from public.pipeline_metrics where $__timeFilter(metric_time) and metric_name = 'transactions_scored' group by 1 order by 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Ingestion volume (transactions / 10 seconds)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "lossguard-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "lossguard-prometheus"},
+          "expr": "redpanda_kafka_consumer_group_lag_sum{redpanda_group=\"lossguard-scorers\"}",
+          "legendFormat": "consumer lag",
+          "refId": "A"
+        }
+      ],
+      "title": "Consumer lag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "lossguard-postgres"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-postgresql-datasource", "uid": "lossguard-postgres"},
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select $__timeGroupAlias(metric_time, '1m'), 100.0 * sum(metric_value) filter (where metric_name = 'transactions_rejected') / nullif(sum(metric_value) filter (where metric_name in ('transactions_scored', 'transactions_rejected')), 0) as \"Validation failure rate\" from public.pipeline_metrics where $__timeFilter(metric_time) group by 1 order by 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Validation failure rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "lossguard-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 30}]}}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "lossguard-prometheus"},
+          "expr": "time() - container_last_seen{name=~\".*lossguard-(consumer|scoring-api|postgres|redpanda|dashboard).*\"}",
+          "legendFormat": "{{name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Container health (seconds since last seen)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["lossguard", "streaming", "fraud"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timezone": "browser",
+  "title": "LossGuard pipeline health",
+  "uid": "lossguard-pipeline",
+  "version": 1
+}
