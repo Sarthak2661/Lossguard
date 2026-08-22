@@ -449,7 +449,8 @@ docker compose run --rm producer python scripts/verify_dead_letter.py
 docker compose run --rm producer python scripts/verify_dead_letter.py
 ```
 
-For a non-Docker developer environment, use Python 3.12. Install `requirements/test.lock` with
+For a non-Docker developer environment, use Python 3.12. Install `requirements/test.windows.lock`
+on Windows or `requirements/test.lock` on Linux with
 `--require-hashes --no-deps`, then run `pip install --no-build-isolation --no-deps -e .`; exact PowerShell and Bash steps
 are in [CONTRIBUTING.md](CONTRIBUTING.md). The editable install exposes all project packages without
 runtime `sys.path` changes. Runtime, trainer, dbt, test, and monitoring containers have separate

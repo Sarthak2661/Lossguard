@@ -20,7 +20,7 @@ editable package without re-resolving dependencies:
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --require-hashes --no-deps -r requirements/test.lock
+python -m pip install --require-hashes --no-deps -r requirements/test.windows.lock
 python -m pip install --no-build-isolation --no-deps -e .
 ```
 
