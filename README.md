@@ -374,3 +374,7 @@ not part of the current implementation and are not represented as live productio
   development conveniences, not production controls.
 - Public deployment, payment-provider ingestion, delayed-label reconciliation, and independent
   model evaluation remain future work.
+
+## License
+
+LossGuard is available under the [MIT License](LICENSE).
