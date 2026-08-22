@@ -1,7 +1,7 @@
 # Scheduled drift-monitor image.
 evidently>=0.7,<0.8
 numpy>=1.26,<3
-pandas>=2.2,<3
+pandas>=2.2,<4
 psycopg[binary]>=3.2,<4
 setuptools>=75,<85
-wheel>=0.45,<1
+wheel>=0.48.0,<1
