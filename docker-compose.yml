@@ -1,21 +1,27 @@
 name: lossguard
 
-x-app: &app
+x-runtime: &runtime
+  image: lossguard-runtime:local
   build:
     context: .
+    dockerfile: Dockerfile
   env_file:
     - path: .env
       required: false
-  environment:
+  environment: &app-environment
     POSTGRES_DB: ${POSTGRES_DB:-lossguard}
     POSTGRES_USER: ${POSTGRES_USER:-lossguard}
-    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lossguard_local_only}
-    DATABASE_URL: postgresql://${POSTGRES_USER:-lossguard}:${POSTGRES_PASSWORD:-lossguard_local_only}@postgres:5432/${POSTGRES_DB:-lossguard}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/bootstrap_env.py}
+    DATABASE_URL: postgresql://${POSTGRES_USER:-lossguard}:${POSTGRES_PASSWORD:?Run python scripts/bootstrap_env.py}@postgres:5432/${POSTGRES_DB:-lossguard}
     KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
     SCORING_API_URL: http://scoring-api:8000
+    SCORING_API_MAX_ATTEMPTS: ${SCORING_API_MAX_ATTEMPTS:-3}
+    SCORING_API_RETRY_BACKOFF_SECONDS: ${SCORING_API_RETRY_BACKOFF_SECONDS:-0.5}
     MODEL_BUNDLE_PATH: /models/fraud_model.joblib
     MODEL_METADATA_PATH: /models/model_metadata.json
-    PII_HASH_SALT: ${PII_HASH_SALT:-change-this-in-any-shared-environment}
+    PII_HASH_SALT: ${PII_HASH_SALT:?Run python scripts/bootstrap_env.py}
+    SCORING_API_KEY: ${SCORING_API_KEY:?Run python scripts/bootstrap_env.py}
+    ADMIN_API_KEY: ${ADMIN_API_KEY:?Run python scripts/bootstrap_env.py}
     LLM_PROVIDER: ${LLM_PROVIDER:-auto}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
@@ -28,7 +34,6 @@ x-app: &app
     OPENAI_COMPATIBLE_MODEL: ${OPENAI_COMPATIBLE_MODEL:-}
     LLM_EXPLANATION_TIMEOUT_SECONDS: ${LLM_EXPLANATION_TIMEOUT_SECONDS:-8}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    PYTHONPATH: /app/src:/app
   volumes:
     - ./models:/models
     - ./src:/app/src:ro
@@ -38,7 +43,7 @@ x-app: &app
 
 services:
   redpanda:
-    image: redpandadata/redpanda:v25.1.9
+    image: redpandadata/redpanda:v25.1.9@sha256:8f7e9e4c1422baaa1a5e2a6c6c668cfe05442cb3cb476542c7dff61725e6fe31
     command:
       - redpanda
       - start
@@ -51,8 +56,8 @@ services:
       - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
       - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
     ports:
-      - "19092:19092"
-      - "9644:9644"
+      - "127.0.0.1:19092:19092"
+      - "127.0.0.1:9644:9644"
     healthcheck:
       test: ["CMD-SHELL", "rpk -X brokers=localhost:9092 cluster health | grep -q 'Healthy:.*true'"]
       interval: 10s
@@ -62,7 +67,7 @@ services:
       - redpanda_data:/var/lib/redpanda/data
 
   topic-init:
-    image: redpandadata/redpanda:v25.1.9
+    image: redpandadata/redpanda:v25.1.9@sha256:8f7e9e4c1422baaa1a5e2a6c6c668cfe05442cb3cb476542c7dff61725e6fe31
     depends_on:
       redpanda:
         condition: service_healthy
@@ -78,13 +83,13 @@ services:
     restart: "no"
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.10-alpine3.22@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-lossguard}
       POSTGRES_USER: ${POSTGRES_USER:-lossguard}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lossguard_local_only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/bootstrap_env.py}
     ports:
-      - "${POSTGRES_HOST_PORT:-55432}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lossguard} -d ${POSTGRES_DB:-lossguard}"]
       interval: 5s
@@ -92,29 +97,30 @@ services:
       retries: 12
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
 
   schema-init:
-    image: postgres:16-alpine
+    image: postgres:16.10-alpine3.22@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD:-lossguard_local_only}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/bootstrap_env.py}
+      GRAFANA_READER_PASSWORD: ${GRAFANA_READER_PASSWORD:?Run python scripts/bootstrap_env.py}
     volumes:
       - ./infrastructure/postgres/init.sql:/schema/init.sql:ro
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - >
         psql -h postgres -U ${POSTGRES_USER:-lossguard} -d ${POSTGRES_DB:-lossguard}
-        -v ON_ERROR_STOP=1 -f /schema/init.sql
+        -v ON_ERROR_STOP=1 -v grafana_reader_password="$${GRAFANA_READER_PASSWORD}"
+        -f /schema/init.sql
     restart: "no"
 
   scoring-api:
-    <<: *app
+    <<: *runtime
     command: ["uvicorn", "apps.scoring_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 10s
@@ -122,7 +128,7 @@ services:
       retries: 12
 
   consumer:
-    <<: *app
+    <<: *runtime
     command: ["python", "-m", "apps.consumer.main"]
     depends_on:
       topic-init:
@@ -135,18 +141,19 @@ services:
         condition: service_healthy
 
   producer:
-    <<: *app
+    <<: *runtime
     command: ["python", "-m", "apps.producer.main"]
     restart: "no"
     depends_on:
       topic-init:
         condition: service_completed_successfully
     environment:
+      <<: *app-environment
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       DATASET_PATH: /data/fraudTest.csv
       REPLAY_MODE: ${REPLAY_MODE:-demo}
       REPLAY_LIMIT: ${REPLAY_LIMIT:-10000}
-      PII_HASH_SALT: ${PII_HASH_SALT:-change-this-in-any-shared-environment}
+      PII_HASH_SALT: ${PII_HASH_SALT:?Run python scripts/bootstrap_env.py}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./dataset:/data:ro
@@ -155,72 +162,22 @@ services:
       - ./scripts:/app/scripts:ro
 
   dashboard:
-    <<: *app
-    image: lossguard-consumer:latest
+    <<: *runtime
     command: ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     depends_on:
       schema-init:
         condition: service_completed_successfully
-
-  prometheus:
-    image: prom/prometheus:v3.5.0
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=7d
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    depends_on:
-      redpanda:
-        condition: service_healthy
-      cadvisor:
-        condition: service_started
-    restart: unless-stopped
-
-  cadvisor:
-    image: ghcr.io/google/cadvisor:v0.60.5
-    privileged: true
-    devices:
-      - /dev/kmsg:/dev/kmsg
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /var/lib/docker:/var/lib/docker:ro
-      - /dev/disk:/dev/disk:ro
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:13.1.0
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-lossguard_admin_local}
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    depends_on:
-      schema-init:
-        condition: service_completed_successfully
-      prometheus:
-        condition: service_started
-    restart: unless-stopped
 
   drift-monitor:
+    image: lossguard-monitoring:local
     build:
       context: .
       dockerfile: monitoring/Dockerfile
     command: ["python", "-m", "monitoring.scheduler"]
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-lossguard}:${POSTGRES_PASSWORD:-lossguard_local_only}@postgres:5432/${POSTGRES_DB:-lossguard}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-lossguard}:${POSTGRES_PASSWORD:?Run python scripts/bootstrap_env.py}@postgres:5432/${POSTGRES_DB:-lossguard}
       DRIFT_TRAINING_PATH: /data/fraudTrain.csv
       DRIFT_REPORT_DIR: /reports/drift
       DRIFT_REFERENCE_ROWS: ${DRIFT_REFERENCE_ROWS:-10000}
@@ -229,7 +186,7 @@ services:
       DRIFT_SHARE_THRESHOLD: ${DRIFT_SHARE_THRESHOLD:-0.30}
       DRIFT_INTERVAL_SECONDS: ${DRIFT_INTERVAL_SECONDS:-604800}
       MODEL_METADATA_PATH: /models/model_metadata.json
-      PII_HASH_SALT: ${PII_HASH_SALT:-change-this-in-any-shared-environment}
+      PII_HASH_SALT: ${PII_HASH_SALT:?Run python scripts/bootstrap_env.py}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./dataset:/data:ro
@@ -244,19 +201,26 @@ services:
     restart: unless-stopped
 
   trainer:
-    <<: *app
+    image: lossguard-trainer:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.trainer
     command:
       - python
       - -m
       - ml.train
       - --input
       - /data/fraudTrain.csv
+      - --test-input
+      - /data/fraudTest.csv
       - --output
       - /models/fraud_model.joblib
       - --metadata-output
       - /models/model_metadata.json
       - --max-rows
       - ${TRAIN_MAX_ROWS:-300000}
+      - --max-test-rows
+      - ${TEST_MAX_ROWS:-0}
     profiles: ["tools"]
     restart: "no"
     volumes:
@@ -266,8 +230,10 @@ services:
       - ./ml:/app/ml:ro
 
   dbt:
+    image: lossguard-dbt:local
     build:
       context: .
+      dockerfile: docker/Dockerfile.dbt
     working_dir: /app/analytics/dbt
     entrypoint: ["dbt"]
     command: ["build", "--profiles-dir", "."]
@@ -277,7 +243,7 @@ services:
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-lossguard}
       POSTGRES_USER: ${POSTGRES_USER:-lossguard}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lossguard_local_only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/bootstrap_env.py}
     depends_on:
       postgres:
         condition: service_healthy
@@ -285,9 +251,11 @@ services:
       - ./analytics/dbt:/app/analytics/dbt
 
   test:
+    image: lossguard-test:local
     build:
       context: .
-    command: ["pytest", "--cov=lossguard", "--cov=apps", "--cov-report=term-missing"]
+      dockerfile: docker/Dockerfile.test
+    command: ["pytest", "--cov", "--cov-report=term-missing", "--cov-fail-under=75"]
     profiles: ["tools"]
     restart: "no"
     volumes:
@@ -296,8 +264,10 @@ services:
       - ./apps:/app/apps:ro
 
   lint:
+    image: lossguard-test:local
     build:
       context: .
+      dockerfile: docker/Dockerfile.test
     command: ["ruff", "check", "."]
     profiles: ["tools"]
     restart: "no"
@@ -305,5 +275,3 @@ services:
 volumes:
   redpanda_data:
   postgres_data:
-  prometheus_data:
-  grafana_data:

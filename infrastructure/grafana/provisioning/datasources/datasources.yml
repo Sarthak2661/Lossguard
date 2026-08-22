@@ -9,7 +9,7 @@ datasources:
     url: postgres:5432
     user: grafana_reader
     secureJsonData:
-      password: grafana_read_only_local
+      password: $GRAFANA_READER_PASSWORD
     jsonData:
       database: lossguard
       sslmode: disable

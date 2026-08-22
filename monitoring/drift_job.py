@@ -11,8 +11,6 @@ from pathlib import Path
 
 import pandas as pd
 import psycopg
-from evidently import Report
-from evidently.presets import DataDriftPreset
 
 from lossguard.features import MODEL_CATEGORICAL_FEATURES, MODEL_FEATURES
 from ml.data import load_training_data
@@ -35,10 +33,7 @@ class DriftConfig:
     @classmethod
     def from_env(cls) -> DriftConfig:
         return cls(
-            database_url=os.getenv(
-                "DATABASE_URL",
-                "postgresql://lossguard:lossguard_local_only@localhost:55432/lossguard",
-            ),
+            database_url=os.environ["DATABASE_URL"],
             training_path=os.getenv("DRIFT_TRAINING_PATH", "dataset/fraudTrain.csv"),
             report_dir=os.getenv("DRIFT_REPORT_DIR", "reports/drift"),
             reference_rows=int(os.getenv("DRIFT_REFERENCE_ROWS", "10000")),
@@ -46,7 +41,7 @@ class DriftConfig:
             min_current_rows=int(os.getenv("DRIFT_MIN_CURRENT_ROWS", "500")),
             drift_share_threshold=float(os.getenv("DRIFT_SHARE_THRESHOLD", "0.30")),
             model_metadata_path=os.getenv("MODEL_METADATA_PATH", "models/model_metadata.json"),
-            pii_hash_salt=os.getenv("PII_HASH_SALT", "change-this-in-any-shared-environment"),
+            pii_hash_salt=os.environ["PII_HASH_SALT"],
         )
 
 
@@ -170,6 +165,9 @@ def persist_result(
 
 
 def run(config: DriftConfig, simulate_shift: bool = False) -> dict:
+    from evidently import Report
+    from evidently.presets import DataDriftPreset
+
     reference = load_reference(config)
     current, window_start, window_end = load_current(config)
     version = model_version(config.model_metadata_path)

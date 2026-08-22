@@ -6,6 +6,8 @@ import httpx
 import pytest
 
 from lossguard.explanations import (
+    FEATURE_LABELS,
+    FEATURE_PHRASES,
     MAX_EXPLANATION_WORDS,
     LLMProviderConfig,
     explain_transaction,
@@ -43,6 +45,10 @@ class FakeResponse:
 
     def json(self) -> dict:
         return self.payload
+
+
+def test_feature_labels_and_phrases_have_identical_keys() -> None:
+    assert FEATURE_LABELS.keys() == FEATURE_PHRASES.keys()
 
 
 class FakeClient:

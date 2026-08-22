@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from pathlib import Path
 
 import joblib
@@ -14,15 +15,22 @@ from lossguard.costs import (
     realized_action_cost,
 )
 from lossguard.features import MODEL_FEATURES, event_to_model_features
+from lossguard.model_artifact import validate_bundle, verify_checksum
 from lossguard.schemas import FeatureContribution, ScoreResponse, TransactionEvent
 
 LOGGER = logging.getLogger(__name__)
 
 
 class ModelService:
-    def __init__(self, bundle_path: str):
+    def __init__(
+        self,
+        bundle_path: str,
+        metric_recorder: Callable[[str, float, dict | None], None] | None = None,
+    ):
         self.bundle_path = Path(bundle_path)
         self.bundle: dict | None = None
+        self.artifact_sha256: str | None = None
+        self.metric_recorder = metric_recorder
         self._explainer = None
         self.reload()
 
@@ -34,14 +42,34 @@ class ModelService:
     def model_version(self) -> str:
         return self.bundle["model_version"] if self.bundle else "heuristic-v0"
 
-    def reload(self) -> None:
+    def reload(self, raise_on_error: bool = False) -> bool:
         if self.bundle_path.exists():
-            self.bundle = joblib.load(self.bundle_path)
+            try:
+                digest = verify_checksum(self.bundle_path)
+                candidate = validate_bundle(joblib.load(self.bundle_path))
+            except Exception:
+                LOGGER.exception("Model bundle validation failed for %s", self.bundle_path)
+                if raise_on_error:
+                    raise
+                return False
+            self.bundle = candidate
+            self.artifact_sha256 = digest
             self._explainer = None
-            LOGGER.info("Loaded model bundle %s", self.bundle_path)
+            LOGGER.info("Loaded verified model bundle %s (sha256=%s)", self.bundle_path, digest)
+            return True
         else:
             self.bundle = None
+            self.artifact_sha256 = None
             LOGGER.warning("Model bundle not found; using transparent development heuristic")
+            return False
+
+    def _record_metric(self, name: str, value: float, labels: dict | None = None) -> None:
+        if self.metric_recorder is None:
+            return
+        try:
+            self.metric_recorder(name, value, labels)
+        except Exception:
+            LOGGER.exception("Failed to persist scoring metric %s", name)
 
     def _heuristic_probability(self, features: dict) -> float:
         category_boost = {
@@ -83,7 +111,9 @@ class ModelService:
 
         frame = pd.DataFrame([{key: features[key] for key in MODEL_FEATURES}])
         transformed = self.bundle["preprocessor"].transform(frame)
-        probability = float(self.bundle["model"].predict_proba(transformed)[0, 1])
+        raw_probability = float(self.bundle["model"].predict_proba(transformed)[0, 1])
+        probability = float(self.bundle["calibrator"].predict([raw_probability])[0])
+        probability = min(max(probability, 0.0), 1.0)
         try:
             if self._explainer is None:
                 import shap
@@ -105,6 +135,14 @@ class ModelService:
             ]
         except Exception as exc:
             LOGGER.warning("SHAP explanation failed: %s", exc)
+            self._record_metric(
+                "shap_explanation_failures",
+                1,
+                {
+                    "model_version": self.model_version,
+                    "error_type": type(exc).__name__,
+                },
+            )
             explanations = []
         return probability, explanations
 

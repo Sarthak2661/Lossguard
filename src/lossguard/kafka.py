@@ -33,20 +33,42 @@ def build_consumer(bootstrap_servers: str, group_id: str = "lossguard-scorers") 
     )
 
 
-def delivery_report(error, message) -> None:
-    if error is not None:
-        LOGGER.error("Kafka delivery failed: %s", error)
-
-
-def publish_json(producer: Producer, topic: str, key: str, payload: dict) -> None:
+def publish_json(
+    producer: Producer,
+    topic: str,
+    key: str,
+    payload: dict,
+    timeout_seconds: float = 10.0,
+) -> None:
+    """Publish one JSON record and return only after broker acknowledgement."""
     encoded = json.dumps(payload, separators=(",", ":"), default=str).encode()
+    delivery_error = None
+    delivered = False
+    deadline = time.monotonic() + timeout_seconds
+
+    def delivery_report(error, _message) -> None:
+        nonlocal delivered, delivery_error
+        delivery_error = error
+        delivered = True
+
     while True:
         try:
             producer.produce(topic, key=key.encode(), value=encoded, on_delivery=delivery_report)
-            producer.poll(0)
-            return
+            break
         except BufferError:
-            producer.poll(0.2)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Kafka producer queue remained full for {topic}") from None
+            producer.poll(min(0.2, remaining))
+
+    while not delivered:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"Kafka delivery confirmation timed out for {topic}")
+        producer.poll(min(0.2, remaining))
+
+    if delivery_error is not None:
+        raise KafkaException(delivery_error)
 
 
 def wait_for_kafka(factory: Callable[[], Producer], attempts: int = 30) -> Producer:

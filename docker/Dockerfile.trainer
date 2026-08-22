@@ -8,11 +8,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd --gid 10001 lossguard \
-    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin lossguard
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && groupadd --gid 10001 lossguard \
+    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin lossguard \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY requirements/monitoring.lock /tmp/monitoring.lock
-RUN python -m pip install --require-hashes --no-deps -r /tmp/monitoring.lock
+COPY requirements/trainer.lock /tmp/trainer.lock
+RUN python -m pip install --require-hashes --no-deps -r /tmp/trainer.lock
 
 COPY pyproject.toml README.md ./
 COPY src ./src
@@ -24,4 +27,4 @@ RUN python -m pip install --no-build-isolation --no-deps -e . \
 
 USER 10001:10001
 
-CMD ["python", "-m", "monitoring.scheduler"]
+CMD ["python", "-m", "ml.train"]

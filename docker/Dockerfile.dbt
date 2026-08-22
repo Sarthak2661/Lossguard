@@ -1,0 +1,22 @@
+FROM python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HOME=/home/lossguard
+
+WORKDIR /app/analytics/dbt
+
+RUN groupadd --gid 10001 lossguard \
+    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin lossguard
+
+COPY requirements/dbt.lock /tmp/dbt.lock
+RUN python -m pip install --require-hashes --no-deps -r /tmp/dbt.lock
+
+COPY --chown=lossguard:lossguard analytics/dbt /app/analytics/dbt
+
+USER 10001:10001
+
+ENTRYPOINT ["dbt"]
+CMD ["build", "--profiles-dir", "."]

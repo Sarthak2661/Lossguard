@@ -1,0 +1,3 @@
+# Analytics transformation image.
+dbt-postgres>=1.9,<2
+sqlparse==0.6.0

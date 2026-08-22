@@ -42,25 +42,29 @@ def replay(mode: str | None = None) -> int:
             try:
                 payload = source_row_to_event(row, settings.pii_hash_salt)
                 event = TransactionEvent.model_validate(payload)
-                if previous_event_time is not None:
-                    actual_delta = (event.event_time - previous_event_time).total_seconds()
-                    delay = compute_delay(actual_delta, replay_mode)
-                    if delay:
-                        time.sleep(delay)
-                publish_json(
-                    producer,
-                    RAW_TOPIC,
-                    event.transaction_id,
-                    event.model_dump(mode="json"),
-                )
-                published += 1
-                previous_event_time = event.event_time
-                if published % 1000 == 0:
-                    LOGGER.info("Published %s transactions", published)
             except Exception as exc:
                 transaction_id = row.get("trans_num", "unknown")
                 LOGGER.warning("Source row %s could not be serialized: %s", transaction_id, exc)
-    producer.flush(30)
+                continue
+
+            if previous_event_time is not None:
+                actual_delta = (event.event_time - previous_event_time).total_seconds()
+                delay = compute_delay(actual_delta, replay_mode)
+                if delay:
+                    time.sleep(delay)
+            publish_json(
+                producer,
+                RAW_TOPIC,
+                event.transaction_id,
+                event.model_dump(mode="json"),
+            )
+            published += 1
+            previous_event_time = event.event_time
+            if published % 1000 == 0:
+                LOGGER.info("Published %s transactions", published)
+
+    if producer.flush(30):
+        raise TimeoutError("Kafka producer still has undelivered records after 30 seconds")
     LOGGER.info("Replay complete: %s transactions", published)
     return published
 

@@ -1,5 +1,8 @@
 $ErrorActionPreference = "Stop"
 
+docker compose -f docker-compose.yml -f docker-compose.observability.yml `
+    --profile observability up -d prometheus grafana
+
 function Read-ConsumerLag {
     $query = [uri]::EscapeDataString('redpanda_kafka_consumer_group_lag_sum{redpanda_group="lossguard-scorers"}')
     $response = Invoke-RestMethod -Uri "http://localhost:9090/api/v1/query?query=$query"

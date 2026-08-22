@@ -1,20 +1,12 @@
 from __future__ import annotations
 
-import sys
 from datetime import timedelta
-from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# Streamlit adds the entrypoint's directory to sys.path. When this file is run
-# directly, that directory is apps/dashboard rather than the repository root.
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from apps.dashboard.data import (  # noqa: E402
+from apps.dashboard.data import (
     available_window,
     create_db_engine,
     get_or_create_plain_explanation,
@@ -23,9 +15,9 @@ from apps.dashboard.data import (  # noqa: E402
     load_recent_transactions,
     load_simulation_rows,
 )
-from apps.dashboard.simulation import simulate_threshold  # noqa: E402
-from lossguard.config import get_settings  # noqa: E402
-from lossguard.explanations import resolve_llm_provider  # noqa: E402
+from apps.dashboard.simulation import simulate_threshold
+from lossguard.config import get_settings
+from lossguard.explanations import resolve_llm_provider
 
 st.set_page_config(page_title="LossGuard", page_icon="🛡️", layout="wide")
 st.title("LossGuard — Fraud vs. Friction")

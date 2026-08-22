@@ -86,13 +86,14 @@ CREATE TABLE IF NOT EXISTS model_drift_reports (
 CREATE INDEX IF NOT EXISTS idx_model_drift_reports_generated
     ON model_drift_reports (generated_at DESC);
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grafana_reader') THEN
-        CREATE ROLE grafana_reader LOGIN PASSWORD 'grafana_read_only_local';
-    END IF;
-END
-$$;
+SELECT format(
+    'CREATE ROLE grafana_reader LOGIN PASSWORD %L',
+    :'grafana_reader_password'
+)
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'grafana_reader')
+\gexec
+
+ALTER ROLE grafana_reader PASSWORD :'grafana_reader_password';
 
 DO $$
 BEGIN

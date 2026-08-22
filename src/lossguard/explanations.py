@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import quote, urlparse
@@ -34,6 +35,22 @@ FEATURE_LABELS = {
     "merchant_category": "merchant category",
     "channel": "purchase channel",
     "customer_ltv_band": "customer value band",
+}
+FEATURE_PHRASES: dict[str, Callable[[str], str]] = {
+    "amount": lambda value: f"the {value} purchase amount",
+    "log_amount": lambda _value: "the purchase size",
+    "distance_km": lambda value: f"the {value} customer-to-merchant distance",
+    "transaction_hour": lambda value: f"the {value} transaction time",
+    "transaction_day_of_week": lambda value: f"the {value} timing",
+    "customer_age": lambda _value: "the customer age profile",
+    "city_population": lambda _value: "the customer location size",
+    "is_night": lambda value: (
+        "the late-night timing" if value == "yes" else "the transaction timing"
+    ),
+    "order_margin_pct": lambda _value: "the merchant margin",
+    "merchant_category": lambda value: f"the {value} merchant category",
+    "channel": lambda value: f"the {value} purchase channel",
+    "customer_ltv_band": lambda value: f"the {value} customer value band",
 }
 SAFE_ENUM_VALUES = {
     "merchant_category": set(MERCHANT_CATEGORIES),
@@ -207,21 +224,7 @@ def safe_risk_drivers(
 def _driver_phrase(driver: dict[str, Any]) -> str:
     feature = driver["feature"]
     value = driver["value"]
-    phrases = {
-        "amount": f"the {value} purchase amount",
-        "log_amount": "the purchase size",
-        "distance_km": f"the {value} customer-to-merchant distance",
-        "transaction_hour": f"the {value} transaction time",
-        "transaction_day_of_week": f"the {value} timing",
-        "customer_age": "the customer age profile",
-        "city_population": "the customer location size",
-        "is_night": "the late-night timing" if value == "yes" else "the transaction timing",
-        "order_margin_pct": "the merchant margin",
-        "merchant_category": f"the {value} merchant category",
-        "channel": f"the {value} purchase channel",
-        "customer_ltv_band": f"the {value} customer value band",
-    }
-    return phrases[feature]
+    return FEATURE_PHRASES[feature](value)
 
 
 def template_explanation(decision: str, drivers: list[dict[str, Any]]) -> str:

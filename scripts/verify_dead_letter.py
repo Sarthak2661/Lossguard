@@ -15,11 +15,9 @@ from lossguard.features import source_row_to_event
 
 def main() -> None:
     kafka_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "redpanda:9092")
-    database_url = os.getenv(
-        "DATABASE_URL", "postgresql://lossguard:lossguard_local_only@postgres:5432/lossguard"
-    )
+    database_url = os.environ["DATABASE_URL"]
     dataset_path = Path(os.getenv("DATASET_PATH", "/data/fraudTest.csv"))
-    salt = os.getenv("PII_HASH_SALT", "change-this-in-any-shared-environment")
+    salt = os.environ["PII_HASH_SALT"]
 
     with dataset_path.open("r", encoding="utf-8", newline="") as handle:
         payload = source_row_to_event(next(csv.DictReader(handle)), salt)

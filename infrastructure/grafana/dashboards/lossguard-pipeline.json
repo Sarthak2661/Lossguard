@@ -84,6 +84,25 @@
       ],
       "title": "Container health (seconds since last seen)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "grafana-postgresql-datasource", "uid": "lossguard-postgres"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+      "targets": [
+        {
+          "datasource": {"type": "grafana-postgresql-datasource", "uid": "lossguard-postgres"},
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "select $__timeGroupAlias(metric_time, '1m'), sum(metric_value) as \"SHAP explanation failures\" from public.pipeline_metrics where $__timeFilter(metric_time) and metric_name = 'shap_explanation_failures' group by 1 order by 1",
+          "refId": "A"
+        }
+      ],
+      "title": "SHAP explanation failures",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",

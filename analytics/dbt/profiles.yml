@@ -6,7 +6,7 @@ lossguard:
       host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
       port: "{{ env_var('POSTGRES_PORT', '5432') | int }}"
       user: "{{ env_var('POSTGRES_USER', 'lossguard') }}"
-      password: "{{ env_var('POSTGRES_PASSWORD', 'lossguard_local_only') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD') }}"
       dbname: "{{ env_var('POSTGRES_DB', 'lossguard') }}"
       schema: analytics
       threads: 4

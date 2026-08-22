@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,14 +11,18 @@ class Settings(BaseSettings):
 
     postgres_db: str = "lossguard"
     postgres_user: str = "lossguard"
-    postgres_password: str = "lossguard_local_only"
-    database_url: str = "postgresql://lossguard:lossguard_local_only@localhost:55432/lossguard"
+    postgres_password: str
+    database_url: str
     kafka_bootstrap_servers: str = "localhost:19092"
     scoring_api_url: str = "http://localhost:8000"
+    scoring_api_max_attempts: int = Field(default=3, ge=1, le=10)
+    scoring_api_retry_backoff_seconds: float = Field(default=0.5, ge=0, le=30)
     dataset_path: str = "dataset/fraudTest.csv"
     replay_mode: str = "demo"
     replay_limit: int = 10_000
-    pii_hash_salt: str = "change-this-in-any-shared-environment"
+    pii_hash_salt: str
+    scoring_api_key: str
+    admin_api_key: str
     model_bundle_path: str = "models/fraud_model.joblib"
     model_metadata_path: str = "models/model_metadata.json"
     slack_webhook_url: str | None = None
@@ -35,6 +40,22 @@ class Settings(BaseSettings):
     openai_compatible_model: str | None = None
     llm_explanation_timeout_seconds: float = 8.0
     log_level: str = "INFO"
+
+    @field_validator("postgres_password", "pii_hash_salt", "scoring_api_key", "admin_api_key")
+    @classmethod
+    def validate_secret(cls, value: str, info: ValidationInfo) -> str:
+        weak_markers = ("change-this", "local_only", "generate_with_bootstrap", "your-")
+        if len(value) < 24 or any(marker in value.lower() for marker in weak_markers):
+            raise ValueError(
+                f"{info.field_name} must be a generated secret containing at least 24 characters"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_distinct_api_keys(self) -> Settings:
+        if self.scoring_api_key == self.admin_api_key:
+            raise ValueError("scoring_api_key and admin_api_key must be different")
+        return self
 
 
 @lru_cache

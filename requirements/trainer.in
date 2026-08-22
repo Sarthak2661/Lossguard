@@ -1,0 +1,8 @@
+# Offline model training only.
+joblib>=1.4,<2
+numpy>=1.26,<3
+pandas>=2.2,<3
+scikit-learn>=1.5,<2
+setuptools>=75,<85
+wheel>=0.45,<1
+xgboost>=2.1,<4

@@ -25,8 +25,9 @@ Analysts can move the decision threshold and immediately see how the dollar trad
    model features, and publishes privacy-safe events to Redpanda.
 2. The consumer validates every event. Valid transactions continue to scoring; malformed records go
    to a rejected topic and PostgreSQL dead-letter table.
-3. FastAPI serves an XGBoost model that returns fraud probability, an `approve`/`verify`/`decline`
-   action, category-specific thresholds, expected costs, and SHAP feature contributions.
+3. FastAPI serves a checksum-verified XGBoost bundle. A separately fitted isotonic calibrator turns
+   raw model scores into probabilities before cost calculations; the API returns the action,
+   category-specific thresholds, expected costs, and SHAP feature contributions.
 4. Scored transactions are stored in PostgreSQL, while dbt builds tested daily and segment-level
    business metrics.
 5. Streamlit presents the dollar impact, threshold simulation, segment comparison, model health,
@@ -80,7 +81,7 @@ flowchart LR
 | Streaming | Redpanda | Kafka-compatible raw, scored, and rejected topics |
 | Validation | Pydantic v2 | Strict event schema and business-rule validation |
 | Storage | PostgreSQL 16 | Decisions, explanations, dead letters, and metrics |
-| Modeling | XGBoost + scikit-learn | Imbalanced classification and preprocessing |
+| Modeling | XGBoost + scikit-learn | Imbalanced classification, isotonic calibration, and preprocessing |
 | Explainability | SHAP | Per-transaction feature contributions |
 | Explanation layer | Anthropic, OpenAI, Gemini, compatible endpoints, or local fallback | One-sentence business explanation |
 | API | FastAPI | Health, scoring, and model-reload endpoints |
@@ -89,6 +90,10 @@ flowchart LR
 | Observability | Prometheus + Grafana + cAdvisor | Lag, throughput, failures, container health |
 | Drift monitoring | Evidently | Scheduled training-vs-current feature comparison |
 | Packaging | Docker Compose | Reproducible local services |
+
+Reviewers should start with the [model card](docs/model-card.md) and
+[business assumptions](docs/business-assumptions.md); the [contributing guide](CONTRIBUTING.md)
+provides the shortest code-review path and local quality commands.
 
 ## Privacy and prompt-injection boundary
 
@@ -99,29 +104,94 @@ flowchart LR
   drivers—not merchant or customer free text. Output must be one sentence under 30 words or the
   local template is used instead.
 - Logs use transaction IDs and never intentionally print raw source rows.
-- Change `PII_HASH_SALT` before any shared deployment.
+- Dead-letter records keep only an allowlisted metadata summary, payload size, and SHA-256 digest;
+  raw rejected content and unknown fields are not persisted or republished.
+- Core database, hashing, API, and Grafana secrets are generated locally and validated at startup.
 
 ## Quick start
 
-Prerequisites: Docker Desktop with its Linux engine running, Docker Compose, at least 6 GB free
-memory, and both dataset CSV files in `dataset/`. Commands below are run from the repository root.
-Local services mount `src/`, `apps/`, and the dbt project so source changes are picked up without
-rebuilding the large ML image; `--build` still creates reproducible standalone images.
+Prerequisites: Docker Desktop 4.28.0 or newer with Linux containers enabled, Docker Compose v2.24.4
+or newer, at least 6 GB free memory, at least 6 GB free disk space, and both dataset CSV files in
+`dataset/`. Compose 2.24.4 is required for the optional `env_file.required` and multi-file overlay
+syntax used here. Commands below are run from the repository root. Confirm the installed versions:
 
 ```powershell
-Copy-Item .env.example .env
+docker version
+docker compose version
+```
+
+```bash
+docker version
+docker compose version
+```
+
+Local services mount `src/`, `apps/`, and the dbt project so source changes are picked up without
+rebuilding the large ML image; `--build` still creates reproducible standalone images.
+Every published port is bound to `127.0.0.1`, so these services are not exposed on the LAN.
+
+```powershell
+python scripts/bootstrap_env.py
 docker compose up -d --build
 ```
 
-The API starts before training, but `/health` clearly reports `development_heuristic`. Train the
-XGBoost model artifact, reload the API, and replay a bounded test stream:
+```bash
+python scripts/bootstrap_env.py
+docker compose up -d --build
+```
+
+The bootstrap refuses to overwrite an existing `.env`. Existing installations can rotate only the
+core generated values while preserving optional provider and webhook settings. Preserve an existing
+PostgreSQL volume by starting only that service and synchronizing its role password:
+
+```powershell
+python scripts/bootstrap_env.py --rotate-core-secrets
+docker compose up -d postgres
+python scripts/sync_postgres_password.py
+```
+
+```bash
+python scripts/bootstrap_env.py --rotate-core-secrets
+docker compose up -d postgres
+python scripts/sync_postgres_password.py
+```
+
+For the `.env` rotated during this update, run only the final two commands when Docker Desktop is
+available; rotating a second time is unnecessary.
+The core file intentionally excludes Prometheus, Grafana, and privileged cAdvisor. Add the
+observability overlay only when telemetry is required:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.observability.yml `
+    --profile observability up -d
+```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml \
+  --profile observability up -d
+```
+
+The API starts before training, but `/health` clearly reports `development_heuristic`. Legacy or
+unsigned bundles are not loaded. Train the calibrated, checksum-protected artifact, reload the API,
+and replay a bounded test stream:
 
 ```powershell
 docker compose --profile tools run --rm trainer
-Invoke-RestMethod -Method Post http://localhost:8000/reload
+$adminKey = ((Get-Content .env | Where-Object { $_ -like 'ADMIN_API_KEY=*' }) -split '=', 2)[1]
+Invoke-RestMethod -Method Post -Headers @{"X-Admin-Key" = $adminKey} http://localhost:8000/reload
 docker compose run --rm producer
 docker compose --profile tools run --rm dbt build --profiles-dir .
 ```
+
+```bash
+docker compose --profile tools run --rm trainer
+set -a; source .env; set +a
+curl -fsS -X POST -H "X-Admin-Key: ${ADMIN_API_KEY}" http://localhost:8000/reload
+docker compose run --rm producer
+docker compose --profile tools run --rm dbt build --profiles-dir .
+```
+
+`/score` requires `X-API-Key`; the consumer supplies it from the generated environment. `/reload`
+requires the separate `X-Admin-Key`. `/health` is intentionally unauthenticated for health checks.
 
 Open:
 
@@ -129,13 +199,17 @@ Open:
 - FastAPI docs: <http://localhost:8000/docs>
 - Redpanda Kafka listener: `localhost:19092`
 - PostgreSQL: `localhost:55432` (containers use `postgres:5432` internally)
-- Grafana pipeline health: <http://localhost:3000> (local default `admin` / `lossguard_admin_local`)
+- Grafana pipeline health: <http://localhost:3000> (generated credentials are in the ignored `.env`)
 - Prometheus: <http://localhost:9090>
 
 The default replay is limited to 10,000 test rows in `demo` mode. Demo mode compresses source time by
 720x, so roughly one source day plays in two minutes. Use `max` for throughput testing:
 
 ```powershell
+docker compose run --rm -e REPLAY_LIMIT=50000 -e REPLAY_MODE=max producer
+```
+
+```bash
 docker compose run --rm -e REPLAY_LIMIT=50000 -e REPLAY_MODE=max producer
 ```
 
@@ -154,6 +228,10 @@ gaps do not stall a live walkthrough. For example, the CLI flag can override the
 docker compose run --rm producer --mode realtime
 ```
 
+```bash
+docker compose run --rm producer --mode realtime
+```
+
 ## Functionality
 
 ### Streaming ingestion and validation
@@ -163,22 +241,35 @@ docker compose run --rm producer --mode realtime
 3. Replay timing follows the timestamp-sorted source in real time, 720x demo, or maximum-throughput mode.
 4. Pydantic validates the privacy-safe event before publication to `txns.raw`.
 5. The consumer validates again, calls the scorer, persists the decision, and publishes `txns.scored`.
-6. Invalid JSON/schema/API failures go to PostgreSQL and `txns.rejected`; the Kafka offset commits only
-   after persistence, so processing is at-least-once and the scored table is idempotent by transaction ID.
+6. Invalid JSON/schema records go to PostgreSQL and `txns.rejected` as sanitized summaries. Scoring
+   dependency failures remain uncommitted for retry. Kafka output delivery is broker-confirmed before
+   the input offset commits, so processing is at-least-once and the scored table is idempotent by ID.
 
 ### Cost-sensitive fraud scoring
 
-1. `ml/train.py` takes the first 80% of timestamp-sorted data for training and the last 20% for validation.
+1. `ml/train.py` divides timestamp-sorted `fraudTrain.csv` into disjoint 70% training, 15%
+   calibration, and 15% threshold-validation windows.
 2. It engineers amount, distance, time, age, population, category, channel, margin, and LTV features.
 3. XGBoost uses class weighting for the severe fraud imbalance.
-4. A validation grid searches verification/decline thresholds for every category using the documented
-   realized-cost function; sparse segments fall back to global thresholds.
-5. The bundle contains preprocessing, model, thresholds, version, and interpretable feature names.
-6. FastAPI returns risk, action, thresholds, three expected costs, retrospective policy cost, savings,
-   and the largest SHAP contributions.
+4. Isotonic regression fits only on the calibration window. Calibrated probabilities—not raw
+   class-weighted XGBoost scores—feed the expected monetary cost calculation.
+5. A threshold-validation grid searches verification/decline thresholds for every category using
+   the documented realized-cost function; sparse segments fall back to global thresholds.
+6. `fraudTest.csv` remains untouched until final evaluation. Metadata reports ROC AUC, average
+   precision, Brier score, log loss, intervention rates, decision counts, policy cost, and savings.
+7. The bundle contains preprocessing, classifier, calibrator, thresholds, version, feature names,
+   schema version, and a SHA-256 checksum sidecar. FastAPI verifies the checksum before deserializing
+   and validates the bundle contract before serving it.
+8. FastAPI returns calibrated risk, action, thresholds, three expected costs, retrospective policy
+   cost, savings, and the largest SHAP contributions.
 
-The default training cap is 300,000 rows for laptop practicality. Set `TRAIN_MAX_ROWS=0` to use all rows.
-The supplied test set remains a final untouched evaluation/replay source.
+The default training cap is 300,000 rows for laptop practicality. Set `TRAIN_MAX_ROWS=0` to use all
+training rows. Final evaluation uses all 555,719 test rows by default; `TEST_MAX_ROWS` exists only for
+fast development checks and should remain `0` for reported results.
+
+The checksum detects accidental corruption or replacement relative to its sidecar; it is not a
+publisher signature. `joblib` can execute code while loading, so both the artifact and checksum are
+trusted-local-only inputs and must never be accepted from an upload or untrusted remote source.
 
 ### Business dashboard
 
@@ -198,15 +289,24 @@ The supplied test set remains a final untouched evaluation/replay source.
 3. cAdvisor supplies container freshness/resource telemetry.
 4. Grafana is provisioned from version-controlled files with PostgreSQL and Prometheus data sources.
 5. The pipeline dashboard covers ingestion volume, consumer lag, validation failure rate, and
-   container health. PostgreSQL access uses a read-only `grafana_reader` role.
+   container health. A separate panel counts `shap_explanation_failures`, emitted by the scoring
+   service whenever local SHAP generation fails. PostgreSQL access uses a read-only
+   `grafana_reader` role.
 6. The consumer optionally sends a privacy-safe Slack webhook alert when risk meets
    `SLACK_HIGH_RISK_THRESHOLD`. No alert is sent unless `SLACK_WEBHOOK_URL` is configured.
 
 To enable Slack locally, set this only in the uncommitted `.env` file, then recreate the consumer:
 
-```powershell
+```dotenv
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 SLACK_HIGH_RISK_THRESHOLD=0.90
+```
+
+```powershell
+docker compose up -d consumer
+```
+
+```bash
 docker compose up -d consumer
 ```
 
@@ -215,6 +315,10 @@ its Kafka offsets and PostgreSQL data are preserved:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/verify_observability.ps1
+```
+
+```bash
+bash scripts/verify_observability.sh
 ```
 
 ### Scheduled drift monitoring
@@ -232,6 +336,11 @@ powershell -ExecutionPolicy Bypass -File scripts/verify_observability.ps1
 Run a normal report or the documented in-memory shift acceptance demonstration:
 
 ```powershell
+docker compose run --rm drift-monitor python -m monitoring.drift_job
+docker compose run --rm drift-monitor python -m monitoring.drift_job --simulate-shift
+```
+
+```bash
 docker compose run --rm drift-monitor python -m monitoring.drift_job
 docker compose run --rm drift-monitor python -m monitoring.drift_job --simulate-shift
 ```
@@ -303,16 +412,32 @@ Then recreate the dashboard so it receives the new environment:
 docker compose up -d --force-recreate dashboard
 ```
 
+```bash
+docker compose up -d --force-recreate dashboard
+```
+
 ## Tests and quality checks
 
 ```powershell
 docker compose --profile tools run --rm test
 docker compose --profile tools run --rm lint
 docker compose config --quiet
+docker compose -f docker-compose.yml -f docker-compose.observability.yml `
+    --profile observability config --quiet
 ```
 
-GitHub Actions runs linting, formatting checks, unit tests, notebook validation, and Compose
-configuration validation on every push and pull request.
+```bash
+docker compose --profile tools run --rm test
+docker compose --profile tools run --rm lint
+docker compose config --quiet
+docker compose -f docker-compose.yml -f docker-compose.observability.yml \
+  --profile observability config --quiet
+```
+
+The non-UI coverage gate is 75%, including branch coverage. GitHub Actions installs the same
+hash-locked test graph used by the test image and also starts real Redpanda
+and PostgreSQL dependencies for broker-confirmation, database idempotency, transient HTTP retry, and
+duplicate-processing integration tests.
 
 Verify dead-letter routing with one uniquely identified malformed event:
 
@@ -320,8 +445,16 @@ Verify dead-letter routing with one uniquely identified malformed event:
 docker compose run --rm producer python scripts/verify_dead_letter.py
 ```
 
-For a non-Docker developer environment, use Python 3.12 and install `.[dev,dbt,notebook,monitoring]` in a
-virtual environment. The extras are split so notebook tooling is not required by deployed services.
+```bash
+docker compose run --rm producer python scripts/verify_dead_letter.py
+```
+
+For a non-Docker developer environment, use Python 3.12. Install `requirements/test.lock` with
+`--require-hashes --no-deps`, then run `pip install --no-build-isolation --no-deps -e .`; exact PowerShell and Bash steps
+are in [CONTRIBUTING.md](CONTRIBUTING.md). The editable install exposes all project packages without
+runtime `sys.path` changes. Runtime, trainer, dbt, test, and monitoring containers have separate
+dependency locks and run as UID/GID `10001:10001`. The privileged cAdvisor container exists only in
+the explicitly enabled observability profile.
 
 Tests cover privacy transformations, schemas, feature engineering, action boundaries, cost calculations,
 threshold optimization, dashboard reconciliation, scorer fallback behavior, prompt allowlisting,
@@ -335,7 +468,11 @@ apps/                 producer, consumer, scoring API, Streamlit dashboard
 analytics/dbt/        sources, staging model, KPI marts, and tests
 docs/                 problem framing and documented business assumptions
 infrastructure/       PostgreSQL, Prometheus, and Grafana provisioning
+docker-compose.yml    lightweight core pipeline
+docker-compose.observability.yml  optional Prometheus/Grafana/cAdvisor overlay
 monitoring/           Evidently drift job, scheduler, and dedicated container
+requirements/         service-specific inputs and deterministic hash lockfiles
+docker/               dedicated trainer, dbt, and test image definitions
 ml/                   training data preparation and training entrypoint
 models/               generated model binary (ignored) and tracked model metadata
 notebooks/            reproducible model walkthrough
@@ -363,9 +500,11 @@ not part of the current implementation and are not represented as live productio
 
 - This is a decision-support simulation, not a payment authorization service.
 - Fraud labels are immediately available only because this is a replay dataset; production labels arrive later.
-- `/reload` is intentionally unauthenticated for local development and must be protected before deployment.
-- The default local credentials, unauthenticated reload endpoint, and single-node infrastructure are
-  development conveniences, not production controls.
+- API-key authentication is appropriate for this local reference stack, but internet-facing use still
+  requires TLS, secret management, rate limiting, authorization policy, and key rotation.
+- SHA-256 verifies artifact integrity against its local sidecar, not publisher identity; production
+  model promotion requires signed artifacts and a controlled registry.
+- The single-node broker/database and host-mounted development source are not production controls.
 - Public deployment, payment-provider ingestion, delayed-label reconciliation, and independent
   model evaluation remain future work.
 
