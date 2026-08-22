@@ -8,25 +8,31 @@ cost-sensitive policy selection, analytics, observability, drift monitoring, and
 LossGuard is a retrospective simulation. It does not authorize payments or claim realized merchant
 savings.
 
-## Project status
+## What LossGuard does
 
-| Phase | Capability | Status |
-|---:|---|---|
-| 0 | Scope, decision framing, and business assumptions | Complete |
-| 1 | Redpanda/PostgreSQL streaming pipeline and dead-letter handling | Complete |
-| 2 | XGBoost scoring, cost-sensitive thresholds, FastAPI, and SHAP | Complete |
-| 3 | dbt marts and Streamlit business dashboard | Complete |
-| 4 | Prometheus/Grafana observability and optional Slack alerts | Complete |
-| 5 | Scheduled Evidently drift monitoring | Complete |
-| 6 | Cached plain-English decision explanations | Complete |
-| 7 | Current-dated simulator and Stripe Sandbox webhooks | Proposed |
+LossGuard helps a fraud team decide whether to approve, verify, or decline each transaction. It does
+not optimize model accuracy in isolation. It compares the expected cost of fraud with the cost of
+challenging or rejecting a legitimate customer, then applies the least-cost action for that merchant
+category.
 
-## Decision problem
+The dashboard translates those decisions into business outcomes: fraud caught, fraud missed,
+customer-friction cost, normal approved volume, and estimated savings against a documented baseline.
+Analysts can move the decision threshold and immediately see how the dollar trade-off changes.
 
-A permissive fraud policy loses money to fraud; an aggressive policy loses legitimate customers.
-LossGuard asks a narrower operational question: for each merchant category, which verification and
-decline thresholds minimize the modeled total cost? See the [scope](docs/phase-0-scope.md) and
-[business assumptions](docs/business-assumptions.md) for the exact decision framing.
+## How it works
+
+1. A replay producer reads timestamped Sparkov transactions, removes direct identifiers, engineers
+   model features, and publishes privacy-safe events to Redpanda.
+2. The consumer validates every event. Valid transactions continue to scoring; malformed records go
+   to a rejected topic and PostgreSQL dead-letter table.
+3. FastAPI serves an XGBoost model that returns fraud probability, an `approve`/`verify`/`decline`
+   action, category-specific thresholds, expected costs, and SHAP feature contributions.
+4. Scored transactions are stored in PostgreSQL, while dbt builds tested daily and segment-level
+   business metrics.
+5. Streamlit presents the dollar impact, threshold simulation, segment comparison, model health,
+   and transaction-level explanations.
+6. Prometheus and Grafana monitor throughput, lag, validation failures, and container health;
+   Evidently compares current feature distributions with the training reference.
 
 ## Dataset
 
@@ -41,13 +47,6 @@ The files are deliberately excluded from Git and must be placed in `dataset/` lo
 The combined source contains 1,852,394 simulated transactions and 9,651 fraud labels. Customer
 margin, lifetime value, verification cost, abandonment, and reacquisition cost are additional
 documented assumptions rather than merchant facts.
-
-### Interview pitch
-
-> I built a streaming fraud-decision system that optimizes a documented cost function instead of
-> accuracy alone. It validates and scores privacy-safe events, learns category-specific action
-> thresholds, and presents the resulting fraud-versus-friction trade-off with transaction-level
-> explanations and operational monitoring.
 
 ## Architecture
 
@@ -114,8 +113,8 @@ Copy-Item .env.example .env
 docker compose up -d --build
 ```
 
-The API starts before training, but `/health` clearly reports `development_heuristic`. Train a real
-Phase 2 artifact, reload the API, and replay a bounded test stream:
+The API starts before training, but `/health` clearly reports `development_heuristic`. Train the
+XGBoost model artifact, reload the API, and replay a bounded test stream:
 
 ```powershell
 docker compose --profile tools run --rm trainer
@@ -155,14 +154,9 @@ gaps do not stall a live walkthrough. For example, the CLI flag can override the
 docker compose run --rm producer --mode realtime
 ```
 
-## Phase-by-phase implementation
+## Functionality
 
-### Phase 0 — scope
-
-`docs/phase-0-scope.md` defines the problem, users, decisions, success criteria, non-goals, and
-interview pitch. `docs/business-assumptions.md` defines every simulated dollar input.
-
-### Phase 1 — local streaming MVP
+### Streaming ingestion and validation
 
 1. The producer reads the large CSV incrementally with `csv.DictReader`.
 2. It hashes the customer identifier and derives category, channel, margin, LTV band, age, and location.
@@ -172,7 +166,7 @@ interview pitch. `docs/business-assumptions.md` defines every simulated dollar i
 6. Invalid JSON/schema/API failures go to PostgreSQL and `txns.rejected`; the Kafka offset commits only
    after persistence, so processing is at-least-once and the scored table is idempotent by transaction ID.
 
-### Phase 2 — cost-sensitive scoring
+### Cost-sensitive fraud scoring
 
 1. `ml/train.py` takes the first 80% of timestamp-sorted data for training and the last 20% for validation.
 2. It engineers amount, distance, time, age, population, category, channel, margin, and LTV features.
@@ -186,7 +180,7 @@ interview pitch. `docs/business-assumptions.md` defines every simulated dollar i
 The default training cap is 300,000 rows for laptop practicality. Set `TRAIN_MAX_ROWS=0` to use all rows.
 The supplied test set remains a final untouched evaluation/replay source.
 
-### Phase 3 — business dashboard
+### Business dashboard
 
 1. dbt creates a typed staging view and daily/segment marts.
 2. dbt tests source uniqueness, accepted decisions, and mart grain.
@@ -197,7 +191,7 @@ The supplied test set remains a final untouched evaluation/replay source.
 5. A transaction drill-down renders stored SHAP contributions and model version.
 6. Source freshness, definitions, and simulation caveats are visible in the app.
 
-### Phase 4 — observability and high-risk alerts
+### Observability and high-risk alerts
 
 1. Prometheus scrapes Redpanda `/public_metrics` every five seconds and stores seven days locally.
 2. Redpanda exports dedicated consumer-group lag gauges for `lossguard-scorers`.
@@ -223,7 +217,7 @@ its Kafka offsets and PostgreSQL data are preserved:
 powershell -ExecutionPolicy Bypass -File scripts/verify_observability.ps1
 ```
 
-### Phase 5 — scheduled drift monitoring
+### Scheduled drift monitoring
 
 1. `drift-monitor` runs immediately at startup and then every seven days by default.
 2. Evidently 0.7.21 compares the latest processed feature snapshots with a deterministic sample of
@@ -246,7 +240,7 @@ The second command deliberately changes the analysis frame only; it does not mod
 records. Refresh Streamlit after it finishes and the latest model-health indicator will show the
 persisted result.
 
-### Phase 6 — plain-English explanation layer
+### Plain-English transaction explanations
 
 1. Opening a transaction in Streamlit lazily converts its strongest SHAP drivers into one business
    sentence; the full SHAP bar chart remains directly underneath.
@@ -320,7 +314,7 @@ docker compose config --quiet
 GitHub Actions runs linting, formatting checks, unit tests, notebook validation, and Compose
 configuration validation on every push and pull request.
 
-Verify the Phase 1 dead-letter acceptance with one uniquely identified malformed event:
+Verify dead-letter routing with one uniquely identified malformed event:
 
 ```powershell
 docker compose run --rm producer python scripts/verify_dead_letter.py
@@ -339,7 +333,7 @@ provider selection, all four provider response formats, and failure/output valid
 streamlit_app.py      canonical Streamlit dashboard entrypoint
 apps/                 producer, consumer, scoring API, Streamlit dashboard
 analytics/dbt/        sources, staging model, KPI marts, and tests
-docs/                 Phase 0 and documented assumptions
+docs/                 problem framing and documented business assumptions
 infrastructure/       PostgreSQL, Prometheus, and Grafana provisioning
 monitoring/           Evidently drift job, scheduler, and dedicated container
 ml/                   training data preparation and training entrypoint
