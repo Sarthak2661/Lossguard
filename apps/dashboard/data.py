@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pandas as pd
 from sqlalchemy import Engine, create_engine, text
@@ -39,7 +39,7 @@ def available_window(engine: Engine) -> tuple[date, date, str]:
     return row["min_date"], row["max_date"], row["freshness"]
 
 
-def load_latest_model_health(engine: Engine) -> dict | None:
+def load_latest_model_health(engine: Engine, max_age_seconds: int = 691200) -> dict | None:
     query = text(
         """
         select generated_at, model_version, reference_rows, current_rows,
@@ -53,7 +53,16 @@ def load_latest_model_health(engine: Engine) -> dict | None:
     )
     with engine.connect() as connection:
         row = connection.execute(query).mappings().first()
-    return dict(row) if row else None
+    if not row:
+        return None
+    result = dict(row)
+    generated_at = result["generated_at"]
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=UTC)
+    result["age_seconds"] = max(0.0, (datetime.now(UTC) - generated_at).total_seconds())
+    result["is_stale"] = result["age_seconds"] > max_age_seconds
+    result["effective_health_status"] = "stale" if result["is_stale"] else result["health_status"]
+    return result
 
 
 def load_daily_kpis(engine: Engine, start_date: date, end_date: date) -> pd.DataFrame:

@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     openai_compatible_api_key: str | None = None
     openai_compatible_model: str | None = None
     llm_explanation_timeout_seconds: float = 8.0
+    drift_health_max_age_seconds: int = Field(default=691200, ge=60)
     log_level: str = "INFO"
 
     @field_validator("postgres_password", "pii_hash_salt", "scoring_api_key", "admin_api_key")

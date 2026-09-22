@@ -48,31 +48,143 @@ llm_provider = resolve_llm_provider(
 )
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, max_entries=16)
 def cached_window():
     return available_window(database_engine(settings.database_url))
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, max_entries=64)
 def cached_kpis(start_date, end_date):
     return load_daily_kpis(database_engine(settings.database_url), start_date, end_date)
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, max_entries=128)
 def cached_simulation(start_date, end_date, category):
     return load_simulation_rows(
         database_engine(settings.database_url), start_date, end_date, category
     )
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, max_entries=64)
 def cached_transactions(category):
     return load_recent_transactions(database_engine(settings.database_url), category)
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, max_entries=8)
 def cached_model_health():
-    return load_latest_model_health(database_engine(settings.database_url))
+    return load_latest_model_health(
+        database_engine(settings.database_url), settings.drift_health_max_age_seconds
+    )
+
+
+@st.fragment
+def render_threshold_simulator(start_date, end_date, categories):
+    st.subheader("What if we move the decline threshold?")
+    category = st.selectbox("Segment", categories, key="simulation_category")
+    rows = cached_simulation(start_date, end_date, category)
+    if rows.empty:
+        st.info("No labelled transactions are available for this segment and date window.")
+        return
+    threshold = st.slider(
+        "Decline threshold", min_value=0.05, max_value=0.95, value=0.50, step=0.01
+    )
+    result = simulate_threshold(rows, threshold)
+    cards = st.columns(5)
+    cards[0].metric("Simulated total cost", f"${result['total_cost']:,.0f}")
+    cards[1].metric("Verify threshold", f"{result['verify_threshold']:.2f}")
+    cards[2].metric("Approved", f"{result['approve_count']:,}")
+    cards[3].metric("Verified", f"{result['verify_count']:,}")
+    cards[4].metric("Declined", f"{result['decline_count']:,}")
+    cost_outcomes = pd.DataFrame(
+        {
+            "Outcome": ["Fraud caught", "Friction cost", "Fraud missed"],
+            "Dollars": [
+                result["fraud_caught_value"],
+                result["friction_cost"],
+                result["fraud_missed_cost"],
+            ],
+        }
+    )
+    impact_chart, approved_volume = st.columns([3, 1])
+    with impact_chart:
+        st.caption("Risk and friction outcomes")
+        st.plotly_chart(
+            px.bar(
+                cost_outcomes,
+                x="Outcome",
+                y="Dollars",
+                color="Outcome",
+                text_auto="$.2s",
+            ),
+            width="stretch",
+        )
+    with approved_volume:
+        with st.container(border=True):
+            st.metric(
+                "Normal approved volume",
+                f"${result['normal_approval_value']:,.0f}",
+            )
+            st.caption(
+                "Legitimate approved transaction value. This is business volume, not a cost "
+                "or modeled saving."
+            )
+    grid = pd.DataFrame(
+        [
+            {"decline_threshold": value, **simulate_threshold(rows, float(value))}
+            for value in [round(x / 100, 2) for x in range(5, 96, 5)]
+        ]
+    )
+    chart = px.line(grid, x="decline_threshold", y="total_cost", markers=True)
+    chart.add_vline(x=threshold, line_dash="dash")
+    st.plotly_chart(chart, width="stretch")
+
+
+@st.fragment
+def render_transaction_explanation(categories):
+    st.subheader("Why was this transaction flagged?")
+    category = st.selectbox("Transaction category", categories, key="detail_category")
+    recent = cached_transactions(category)
+    if recent.empty:
+        st.info("No transactions are available for this category.")
+        return
+    transaction_id = st.selectbox("Transaction", recent["transaction_id"].tolist())
+    selected = recent.loc[recent["transaction_id"] == transaction_id].iloc[0]
+    st.write(
+        f"**{selected['decision'].upper()}** · risk {float(selected['fraud_probability']):.2%} · "
+        f"${float(selected['amount']):,.2f} · {selected['merchant']} · "
+        f"model {selected['model_version']}"
+    )
+    try:
+        plain = get_or_create_plain_explanation(
+            database_engine(settings.database_url),
+            selected.to_dict(),
+            provider_config=llm_provider,
+        )
+        with st.container(border=True):
+            st.markdown(f"**{plain['explanation_text']}**")
+            st.caption(
+                f"Explanation source: {plain['explanation_source']} · "
+                f"model: {plain['explanation_model']} · cached in PostgreSQL."
+            )
+    except Exception as exc:
+        st.warning(f"The plain-English explanation cache is unavailable: {exc}")
+    explanation = pd.DataFrame(selected["explanation"] or [])
+    if explanation.empty:
+        st.info("No feature explanation was recorded for this transaction.")
+        return
+    st.caption("Technical detail: raw SHAP feature contributions")
+    st.plotly_chart(
+        px.bar(
+            explanation.sort_values("contribution"),
+            x="contribution",
+            y="feature",
+            orientation="h",
+            color="contribution",
+            color_continuous_scale="RdBu_r",
+            color_continuous_midpoint=0,
+        ),
+        width="stretch",
+    )
 
 
 try:
@@ -92,17 +204,27 @@ except Exception:
 
 if model_health is None:
     st.info("Model health: not evaluated yet. The scheduled Evidently job will publish a status.")
-elif model_health["health_status"] == "ok":
+elif model_health["effective_health_status"] == "stale":
+    st.error(
+        "Model health: STALE · the latest drift report is older than the configured freshness "
+        f"limit · last checked {model_health['generated_at']}"
+    )
+elif model_health["effective_health_status"] == "ok":
     st.success(
         "Model health: OK · "
         f"{model_health['drifted_features']}/{model_health['total_features']} features drifting "
         f"({float(model_health['drift_share']):.0%}) · checked {model_health['generated_at']}"
     )
-elif model_health["health_status"] == "drifting":
+elif model_health["effective_health_status"] == "drifting":
     st.warning(
         "Model health: DRIFTING · "
         f"{model_health['drifted_features']}/{model_health['total_features']} features drifting "
         f"({float(model_health['drift_share']):.0%}) · checked {model_health['generated_at']}"
+    )
+elif model_health["effective_health_status"] == "error":
+    st.error(
+        "Model health: ERROR · the latest drift job failed; inspect the persisted report details "
+        f"and drift-monitor logs · checked {model_health['generated_at']}"
     )
 else:
     st.info(
@@ -230,126 +352,8 @@ st.dataframe(
     },
 )
 
-st.subheader("What if we move the decline threshold?")
-simulation_category = st.selectbox("Segment", categories, key="simulation_category")
-simulation_rows = cached_simulation(start_date, end_date, simulation_category)
-if simulation_rows.empty:
-    st.info("No labelled transactions are available for this segment and date window.")
-else:
-    decline_threshold = st.slider(
-        "Decline threshold", min_value=0.05, max_value=0.95, value=0.50, step=0.01
-    )
-    result = simulate_threshold(simulation_rows, decline_threshold)
-    sim_cards = st.columns(5)
-    sim_cards[0].metric("Simulated total cost", f"${result['total_cost']:,.0f}")
-    sim_cards[1].metric("Verify threshold", f"{result['verify_threshold']:.2f}")
-    sim_cards[2].metric("Approved", f"{result['approve_count']:,}")
-    sim_cards[3].metric("Verified", f"{result['verify_count']:,}")
-    sim_cards[4].metric("Declined", f"{result['decline_count']:,}")
-
-    st.markdown("**Dollar outcome at this threshold**")
-    threshold_outcome_cards = st.columns(4)
-    threshold_outcome_cards[0].metric("Fraud caught", f"${result['fraud_caught_value']:,.0f}")
-    threshold_outcome_cards[1].metric("Friction cost", f"${result['friction_cost']:,.0f}")
-    threshold_outcome_cards[2].metric("Fraud missed", f"${result['fraud_missed_cost']:,.0f}")
-    threshold_outcome_cards[3].metric(
-        "Normal approvals", f"${result['normal_approval_value']:,.0f}"
-    )
-    threshold_outcomes = pd.DataFrame(
-        {
-            "Outcome": ["Fraud caught", "Friction cost", "Fraud missed", "Normal approvals"],
-            "Dollars": [
-                result["fraud_caught_value"],
-                result["friction_cost"],
-                result["fraud_missed_cost"],
-                result["normal_approval_value"],
-            ],
-        }
-    )
-    st.plotly_chart(
-        px.bar(
-            threshold_outcomes,
-            x="Outcome",
-            y="Dollars",
-            color="Outcome",
-            text_auto="$.2s",
-            labels={"Dollars": "Amount ($)"},
-        ),
-        width="stretch",
-    )
-    grid = pd.DataFrame(
-        [
-            {"decline_threshold": value, **simulate_threshold(simulation_rows, float(value))}
-            for value in [round(x / 100, 2) for x in range(5, 96, 5)]
-        ]
-    )
-    threshold_chart = px.line(
-        grid, x="decline_threshold", y="total_cost", markers=True, labels={"total_cost": "Cost ($)"}
-    )
-    threshold_chart.add_vline(x=decline_threshold, line_dash="dash")
-    st.plotly_chart(threshold_chart, width="stretch")
-
-st.subheader("Why was this transaction flagged?")
-detail_category = st.selectbox("Transaction category", categories, key="detail_category")
-recent = cached_transactions(detail_category)
-if recent.empty:
-    st.info("No transactions are available for this category.")
-else:
-    transaction_id = st.selectbox("Transaction", recent["transaction_id"].tolist())
-    selected = recent.loc[recent["transaction_id"] == transaction_id].iloc[0]
-    st.write(
-        f"**{selected['decision'].upper()}** · risk {float(selected['fraud_probability']):.2%} · "
-        f"${float(selected['amount']):,.2f} · {selected['merchant']} · "
-        f"model {selected['model_version']}"
-    )
-    selected_record = selected.to_dict()
-    try:
-        plain_explanation = get_or_create_plain_explanation(
-            database_engine(settings.database_url),
-            selected_record,
-            provider_config=llm_provider,
-        )
-        with st.container(border=True):
-            st.markdown(f"**{plain_explanation['explanation_text']}**")
-            provider_labels = {
-                "claude": "Anthropic Claude",
-                "anthropic": "Anthropic Claude",
-                "openai": "OpenAI",
-                "gemini": "Google Gemini",
-                "openai_compatible": "an OpenAI-compatible provider",
-            }
-            source = plain_explanation["explanation_source"]
-            if source in provider_labels:
-                st.caption(
-                    f"Plain-English explanation generated by {provider_labels[source]} using "
-                    f"{plain_explanation['explanation_model']} and cached in PostgreSQL."
-                )
-            else:
-                st.caption(
-                    "Local fallback explanation, cached in PostgreSQL. Configure `LLM_PROVIDER` "
-                    "and the selected provider's private API settings to enable LLM wording."
-                )
-    except Exception as exc:
-        st.warning(f"The plain-English explanation cache is unavailable: {exc}")
-
-    explanation = pd.DataFrame(selected["explanation"] or [])
-    if explanation.empty:
-        st.info("No feature explanation was recorded for this transaction.")
-    else:
-        st.caption("Technical detail: raw SHAP feature contributions")
-        explanation = explanation.sort_values("contribution")
-        st.plotly_chart(
-            px.bar(
-                explanation,
-                x="contribution",
-                y="feature",
-                orientation="h",
-                color="contribution",
-                color_continuous_scale="RdBu_r",
-                color_continuous_midpoint=0,
-            ),
-            width="stretch",
-        )
+render_threshold_simulator(start_date, end_date, categories)
+render_transaction_explanation(categories)
 
 with st.expander("Metric definitions and caveats"):
     st.markdown(

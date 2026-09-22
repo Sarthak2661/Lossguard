@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from lossguard.features import MODEL_FEATURES
 from monitoring.drift_job import (
@@ -158,3 +159,20 @@ def test_run_persists_insufficient_data_without_generating_report(tmp_path, monk
 
     assert result["status"] == "insufficient_data"
     assert persisted[0]["status"] == "insufficient_data"
+
+
+def test_run_persists_sanitized_error_and_propagates(tmp_path, monkeypatch):
+    persisted = []
+    monkeypatch.setattr(
+        "monitoring.drift_job._run_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad report")),
+    )
+    monkeypatch.setattr(
+        "monitoring.drift_job.persist_result",
+        lambda *_args, **kwargs: persisted.append(kwargs),
+    )
+    with pytest.raises(ValueError, match="bad report"):
+        run(config(tmp_path))
+    assert persisted[0]["status"] == "error"
+    assert persisted[0]["details"]["error_type"] == "ValueError"
+    assert "bad report" not in persisted[0]["details"]["message"]

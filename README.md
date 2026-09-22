@@ -49,6 +49,20 @@ The combined source contains 1,852,394 simulated transactions and 9,651 fraud la
 margin, lifetime value, verification cost, abandonment, and reacquisition cost are additional
 documented assumptions rather than merchant facts.
 
+Before using the local CSVs, verify their SHA-256 hashes, required columns, row counts, labels,
+amounts, and date ranges against the committed manifest:
+
+```powershell
+python scripts/validate_dataset.py --data-dir dataset
+```
+
+```bash
+python scripts/validate_dataset.py --data-dir dataset
+```
+
+The validator reads the files without modifying them. A mismatch stops with an error; obtain the
+expected dataset files rather than changing the manifest to fit an unknown copy.
+
 ## Architecture
 
 ```mermaid
@@ -282,6 +296,14 @@ trusted-local-only inputs and must never be accepted from an upload or untrusted
 5. A transaction drill-down renders stored SHAP contributions and model version.
 6. Source freshness, definitions, and simulation caveats are visible in the app.
 
+The threshold simulator and transaction review run as separate Streamlit fragments, with bounded
+30-second query caches. The threshold comparison keeps legitimate approved transaction volume
+separate from fraud and friction costs, because approved volume is not a saving. A drift report
+older than the default eight-day freshness window is shown as `STALE`. If report generation fails
+while PostgreSQL is available, an `ERROR` state is persisted rather than silently leaving the
+previous healthy status in place. Visiting the scoring API root also points to its health and
+API-documentation routes.
+
 ### Observability and high-risk alerts
 
 1. Prometheus scrapes Redpanda `/public_metrics` every five seconds and stores seven days locally.
@@ -326,11 +348,13 @@ bash scripts/verify_observability.sh
 1. `drift-monitor` runs immediately at startup and then every seven days by default.
 2. Evidently 0.7.21 compares the latest processed feature snapshots with a deterministic sample of
    `fraudTrain.csv` using `DataDriftPreset`.
-3. JSON and HTML reports are written under `reports/drift/`; summary rows are persisted in
-   `model_drift_reports`.
-4. Streamlit displays `Model health: OK`, `DRIFTING`, `INSUFFICIENT DATA`, or `ERROR` from the latest
-   persisted result. The default alert boundary is 30% of monitored features drifting.
-5. Current rows are selected by `processed_at`, so replaying a different source slice naturally
+3. JSON and HTML reports are written under `reports/drift/`; success, insufficient-data, and
+   sanitized error states are persisted in `model_drift_reports` when the database is available.
+4. Streamlit treats reports older than the default eight-day freshness window as `STALE`, even
+   when their last recorded result was `OK`.
+5. Streamlit displays `OK`, `DRIFTING`, `STALE`, `INSUFFICIENT DATA`, or `ERROR` from the latest
+   persisted result. The default drift boundary is 30% of monitored features.
+6. Current rows are selected by `processed_at`, so replaying a different source slice naturally
    changes the rolling comparison even when transaction event dates are historical.
 
 Run a normal report or the documented in-memory shift acceptance demonstration:

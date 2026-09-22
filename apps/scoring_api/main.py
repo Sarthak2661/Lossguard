@@ -26,6 +26,18 @@ app = FastAPI(
 )
 
 
+@app.get("/")
+def root() -> dict:
+    """Describe the service and point browser users to its operational endpoints."""
+    return {
+        "service": "LossGuard Scoring API",
+        "status": "ok",
+        "health": "/health",
+        "documentation": "/docs",
+        "score": "POST /score (requires X-API-Key)",
+    }
+
+
 def _require_key(candidate: str | None, expected: str) -> None:
     if candidate is None or not secrets.compare_digest(candidate, expected):
         raise HTTPException(

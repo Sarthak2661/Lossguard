@@ -164,7 +164,7 @@ def persist_result(
         )
 
 
-def run(config: DriftConfig, simulate_shift: bool = False) -> dict:
+def _run_report(config: DriftConfig, simulate_shift: bool = False) -> dict:
     from evidently import Report
     from evidently.presets import DataDriftPreset
 
@@ -246,6 +246,37 @@ def run(config: DriftConfig, simulate_shift: bool = False) -> dict:
     }
     LOGGER.info("Drift report: %s", result)
     return result
+
+
+def run(config: DriftConfig, simulate_shift: bool = False) -> dict:
+    """Run a report and persist a sanitized error state before propagating failures."""
+    try:
+        return _run_report(config, simulate_shift=simulate_shift)
+    except Exception as exc:
+        details = {
+            "error_type": type(exc).__name__,
+            "message": "Drift report failed; inspect drift-monitor logs",
+            "simulated_shift": simulate_shift,
+        }
+        try:
+            persist_result(
+                config,
+                version=model_version(config.model_metadata_path),
+                reference_rows=0,
+                current_rows=0,
+                drifted_features=0,
+                total_features=len(MODEL_FEATURES),
+                drift_share=0.0,
+                status="error",
+                window_start=None,
+                window_end=None,
+                json_path=None,
+                html_path=None,
+                details=details,
+            )
+        except Exception:
+            LOGGER.exception("Drift failed and its error state could not be persisted")
+        raise
 
 
 def parse_args() -> argparse.Namespace:

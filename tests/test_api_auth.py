@@ -8,6 +8,14 @@ from lossguard.config import get_settings
 client = TestClient(app)
 
 
+def test_root_describes_browser_entrypoints() -> None:
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.json()["documentation"] == "/docs"
+    assert response.json()["health"] == "/health"
+
+
 def test_health_remains_available_for_container_checks() -> None:
     assert client.get("/health").status_code == 200
 
