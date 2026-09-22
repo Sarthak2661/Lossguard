@@ -6,7 +6,10 @@ import re
 import subprocess
 from pathlib import Path
 
-from scripts.bootstrap_env import parse_env
+try:
+    from scripts.bootstrap_env import parse_env
+except ModuleNotFoundError:  # Support the documented direct-script invocation.
+    from bootstrap_env import parse_env
 
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
