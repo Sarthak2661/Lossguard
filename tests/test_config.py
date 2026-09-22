@@ -45,6 +45,7 @@ def test_bootstrap_generates_distinct_secrets_and_preserves_optional_values(tmp_
     bootstrap(env_path)
     lines, generated = parse_env(env_path.read_text(encoding="utf-8"))
 
+    assert (tmp_path / "reports" / "drift").is_dir()
     assert len({generated[key] for key in GENERATED_KEYS}) == len(GENERATED_KEYS)
     assert all(len(generated[key]) >= 24 for key in GENERATED_KEYS)
     env_path.write_text("\n".join(lines + ["OPENAI_API_KEY=keep-private-value"]) + "\n")

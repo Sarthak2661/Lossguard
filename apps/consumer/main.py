@@ -7,14 +7,14 @@ import signal
 import time
 
 import httpx
-from confluent_kafka import KafkaError, KafkaException
+from confluent_kafka import KafkaError, KafkaException, TopicPartition
 from pydantic import ValidationError
 
 from lossguard.alerts import send_high_risk_alert
 from lossguard.config import get_settings
 from lossguard.constants import RAW_TOPIC, REJECTED_TOPIC, SCORED_TOPIC
-from lossguard.database import TransactionRepository
-from lossguard.kafka import build_consumer, build_producer, publish_json, wait_for_kafka
+from lossguard.database import OutboxRecord, TransactionRepository, WriteBatch
+from lossguard.kafka import build_consumer
 from lossguard.schemas import RejectedEvent, ScoreResponse, TransactionEvent
 
 LOGGER = logging.getLogger("lossguard.consumer")
@@ -121,18 +121,59 @@ def score_with_retry(
 
 def run() -> None:
     settings = get_settings()
-    repository = TransactionRepository(settings.database_url)
+    repository = TransactionRepository(
+        settings.database_url,
+        min_pool_size=settings.postgres_pool_min_size,
+        max_pool_size=settings.postgres_pool_max_size,
+    )
     repository.wait_until_ready()
-    producer = wait_for_kafka(lambda: build_producer(settings.kafka_bootstrap_servers))
     consumer = build_consumer(settings.kafka_bootstrap_servers)
     consumer.subscribe([RAW_TOPIC])
     processed = rejected = 0
+    batch = WriteBatch()
+    messages = []
+    pending_alerts: list[tuple[TransactionEvent, ScoreResponse]] = []
+    last_flush = time.monotonic()
+
+    def flush() -> None:
+        nonlocal batch, messages, pending_alerts, last_flush
+        if not messages:
+            return
+        repository.save_batch(batch)
+        offsets: dict[tuple[str, int], TopicPartition] = {}
+        for source_message in messages:
+            key = (source_message.topic(), source_message.partition())
+            offsets[key] = TopicPartition(*key, source_message.offset() + 1)
+        # Source offsets move only after the PostgreSQL transaction and outbox row commit.
+        consumer.commit(offsets=list(offsets.values()), asynchronous=False)
+        for alert_event, alert_score in pending_alerts:
+            if send_high_risk_alert(
+                alert_event,
+                alert_score,
+                settings.slack_webhook_url,
+                settings.slack_high_risk_threshold,
+                settings.dashboard_public_url,
+                client,
+            ):
+                repository.record_metric(
+                    "high_risk_alerts_sent", 1, {"decision": alert_score.decision}
+                )
+        batch = WriteBatch()
+        messages = []
+        pending_alerts = []
+        last_flush = time.monotonic()
 
     with httpx.Client(base_url=settings.scoring_api_url, timeout=15.0) as client:
         try:
             while RUNNING:
                 message = consumer.poll(1.0)
                 if message is None:
+                    flush_due = (
+                        messages
+                        and time.monotonic() - last_flush >= settings.consumer_flush_seconds
+                    )
+                    if flush_due:
+                        flush()
                     continue
                 if message.error():
                     if message.error().code() != KafkaError._PARTITION_EOF:
@@ -145,23 +186,32 @@ def run() -> None:
                     event = TransactionEvent.model_validate(payload)
                 except (json.JSONDecodeError, ValidationError, ValueError) as exc:
                     rejection = rejection_from_error(payload, exc, raw_value)
-                    repository.save_rejection(rejection)
-                    publish_json(
-                        producer,
-                        REJECTED_TOPIC,
-                        rejection.transaction_id or f"rejected-{message.offset()}",
-                        rejection.model_dump(mode="json"),
+                    message_key = rejection.transaction_id or (
+                        f"rejected-{message.partition()}-{message.offset()}"
                     )
-                    repository.record_metric(
-                        "transactions_rejected", 1, {"error": type(exc).__name__}
+                    batch.rejections.append(rejection)
+                    batch.metrics.append(
+                        ("transactions_rejected", 1, {"error": type(exc).__name__})
                     )
+                    batch.outbox.append(
+                        OutboxRecord(
+                            dedupe_key=(
+                                f"rejected:{message.topic()}:{message.partition()}:{message.offset()}"
+                            ),
+                            topic=REJECTED_TOPIC,
+                            message_key=message_key,
+                            payload=rejection.model_dump(mode="json"),
+                        )
+                    )
+                    messages.append(message)
                     rejected += 1
                     LOGGER.warning(
                         "Rejected transaction %s (%s)",
                         rejection.transaction_id,
                         rejection.error_type,
                     )
-                    consumer.commit(message=message, asynchronous=False)
+                    if len(batch) >= settings.consumer_write_batch_size:
+                        flush()
                     continue
 
                 try:
@@ -173,27 +223,22 @@ def run() -> None:
                         settings.scoring_api_retry_backoff_seconds,
                         repository.record_metric,
                     )
-                    repository.save_score(event, score)
-                    publish_json(
-                        producer,
-                        SCORED_TOPIC,
-                        event.transaction_id,
-                        {**event.model_dump(mode="json"), **score.model_dump(mode="json")},
-                    )
-                    processed += 1
-                    repository.record_metric("transactions_scored", 1, {"decision": score.decision})
-                    alert_sent = send_high_risk_alert(
-                        event,
-                        score,
-                        settings.slack_webhook_url,
-                        settings.slack_high_risk_threshold,
-                        settings.dashboard_public_url,
-                        client,
-                    )
-                    if alert_sent:
-                        repository.record_metric(
-                            "high_risk_alerts_sent", 1, {"decision": score.decision}
+                    batch.scores.append((event, score))
+                    batch.metrics.append(("transactions_scored", 1, {"decision": score.decision}))
+                    batch.outbox.append(
+                        OutboxRecord(
+                            dedupe_key=f"scored:{event.transaction_id}:{score.model_version}",
+                            topic=SCORED_TOPIC,
+                            message_key=event.transaction_id,
+                            payload={
+                                **event.model_dump(mode="json"),
+                                **score.model_dump(mode="json"),
+                            },
                         )
+                    )
+                    messages.append(message)
+                    pending_alerts.append((event, score))
+                    processed += 1
                 except httpx.HTTPError:
                     LOGGER.warning(
                         "Scoring dependency failed for %s; leaving Kafka offset uncommitted",
@@ -204,12 +249,15 @@ def run() -> None:
                     raise RuntimeError(
                         f"Scoring API returned an invalid contract for {event.transaction_id}"
                     ) from exc
-                consumer.commit(message=message, asynchronous=False)
+                if len(batch) >= settings.consumer_write_batch_size:
+                    flush()
                 if (processed + rejected) % 500 == 0:
                     LOGGER.info("Processed=%s rejected=%s", processed, rejected)
         finally:
-            producer.flush(10)
+            if messages:
+                flush()
             consumer.close()
+            repository.close()
 
 
 def main() -> None:

@@ -17,6 +17,11 @@ x-runtime: &runtime
     SCORING_API_URL: http://scoring-api:8000
     SCORING_API_MAX_ATTEMPTS: ${SCORING_API_MAX_ATTEMPTS:-3}
     SCORING_API_RETRY_BACKOFF_SECONDS: ${SCORING_API_RETRY_BACKOFF_SECONDS:-0.5}
+    POSTGRES_POOL_MIN_SIZE: ${POSTGRES_POOL_MIN_SIZE:-1}
+    POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-8}
+    CONSUMER_WRITE_BATCH_SIZE: ${CONSUMER_WRITE_BATCH_SIZE:-100}
+    CONSUMER_FLUSH_SECONDS: ${CONSUMER_FLUSH_SECONDS:-1}
+    DRIFT_HEALTH_MAX_AGE_SECONDS: ${DRIFT_HEALTH_MAX_AGE_SECONDS:-691200}
     MODEL_BUNDLE_PATH: /models/fraud_model.joblib
     MODEL_METADATA_PATH: /models/model_metadata.json
     PII_HASH_SALT: ${PII_HASH_SALT:?Run python scripts/bootstrap_env.py}
@@ -54,7 +59,7 @@ services:
       - --node-id=0
       - --check=false
       - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
-      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://127.0.0.1:19092
     ports:
       - "127.0.0.1:19092:19092"
       - "127.0.0.1:9644:9644"
@@ -76,10 +81,17 @@ services:
       - >
         rpk -X brokers=redpanda:9092 topic create txns.raw txns.scored txns.rejected
         --partitions=3 --replicas=1 || true;
+        rpk -X brokers=redpanda:9092 topic alter-config txns.raw txns.scored
+        --set retention.ms=$${KAFKA_TRANSACTION_RETENTION_MS};
+        rpk -X brokers=redpanda:9092 topic alter-config txns.rejected
+        --set retention.ms=$${KAFKA_REJECTED_RETENTION_MS};
         rpk -X brokers=redpanda:9092 -X admin.hosts=redpanda:9644 cluster config set enable_consumer_group_metrics
         '["group","partition","consumer_lag"]';
         rpk -X brokers=redpanda:9092 -X admin.hosts=redpanda:9644 cluster config set
         consumer_group_lag_collection_interval_sec 5
+    environment:
+      KAFKA_TRANSACTION_RETENTION_MS: ${KAFKA_TRANSACTION_RETENTION_MS:-604800000}
+      KAFKA_REJECTED_RETENTION_MS: ${KAFKA_REJECTED_RETENTION_MS:-2592000000}
     restart: "no"
 
   postgres:
@@ -105,16 +117,54 @@ services:
         condition: service_healthy
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:?Run python scripts/bootstrap_env.py}
+      POSTGRES_DB: ${POSTGRES_DB:-lossguard}
+      POSTGRES_USER: ${POSTGRES_USER:-lossguard}
       GRAFANA_READER_PASSWORD: ${GRAFANA_READER_PASSWORD:?Run python scripts/bootstrap_env.py}
     volumes:
-      - ./infrastructure/postgres/init.sql:/schema/init.sql:ro
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - >
-        psql -h postgres -U ${POSTGRES_USER:-lossguard} -d ${POSTGRES_DB:-lossguard}
-        -v ON_ERROR_STOP=1 -v grafana_reader_password="$${GRAFANA_READER_PASSWORD}"
-        -f /schema/init.sql
+      - ./infrastructure/postgres/migrations:/migrations:ro
+      - ./infrastructure/postgres/run-migrations.sh:/migration-runner/run.sh:ro
+    entrypoint: ["/bin/sh", "/migration-runner/run.sh"]
     restart: "no"
+
+  dataset-check:
+    image: lossguard-trainer:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.trainer
+    command: ["python", "scripts/validate_dataset.py", "--data-dir", "/data", "--manifest", "config/dataset_manifest.json"]
+    restart: "no"
+    volumes:
+      - ./dataset:/data:ro
+
+  model-init:
+    image: lossguard-trainer:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PII_HASH_SALT: ${PII_HASH_SALT:?Run python scripts/bootstrap_env.py}
+    command:
+      - python
+      - scripts/ensure_model.py
+      - --input
+      - /data/fraudTrain.csv
+      - --test-input
+      - /data/fraudTest.csv
+      - --output
+      - /models/fraud_model.joblib
+      - --metadata-output
+      - /models/model_metadata.json
+      - --max-rows
+      - ${TRAIN_MAX_ROWS:-300000}
+      - --max-test-rows
+      - ${TEST_MAX_ROWS:-0}
+    restart: "no"
+    depends_on:
+      dataset-check:
+        condition: service_completed_successfully
+    volumes:
+      - ./dataset:/data:ro
+      - ./models:/models
 
   scoring-api:
     <<: *runtime
@@ -126,6 +176,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+    depends_on:
+      schema-init:
+        condition: service_completed_successfully
+      model-init:
+        condition: service_completed_successfully
 
   consumer:
     <<: *runtime
@@ -140,13 +195,28 @@ services:
       scoring-api:
         condition: service_healthy
 
+  outbox-publisher:
+    <<: *runtime
+    command: ["python", "-m", "apps.outbox_publisher.main"]
+    environment:
+      <<: *app-environment
+      OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-100}
+      OUTBOX_POLL_SECONDS: ${OUTBOX_POLL_SECONDS:-0.25}
+    depends_on:
+      topic-init:
+        condition: service_completed_successfully
+      schema-init:
+        condition: service_completed_successfully
+
   producer:
     <<: *runtime
     command: ["python", "-m", "apps.producer.main"]
     restart: "no"
     depends_on:
-      topic-init:
+      dataset-check:
         condition: service_completed_successfully
+      consumer:
+        condition: service_started
     environment:
       <<: *app-environment
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
@@ -200,6 +270,26 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  retention:
+    image: lossguard-monitoring:local
+    command: ["python", "-m", "maintenance.retention"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-lossguard}:${POSTGRES_PASSWORD:?Run python scripts/bootstrap_env.py}@postgres:5432/${POSTGRES_DB:-lossguard}
+      DRIFT_REPORT_DIR: /reports/drift
+      RETENTION_SCORED_DAYS: ${RETENTION_SCORED_DAYS:-730}
+      RETENTION_REJECTIONS_DAYS: ${RETENTION_REJECTIONS_DAYS:-30}
+      RETENTION_METRICS_DAYS: ${RETENTION_METRICS_DAYS:-90}
+      RETENTION_DRIFT_REPORTS_DAYS: ${RETENTION_DRIFT_REPORTS_DAYS:-180}
+      RETENTION_OUTBOX_DAYS: ${RETENTION_OUTBOX_DAYS:-7}
+      RETENTION_INTERVAL_SECONDS: ${RETENTION_INTERVAL_SECONDS:-86400}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./reports:/reports
+    depends_on:
+      schema-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   trainer:
     image: lossguard-trainer:local
     build:
@@ -222,12 +312,20 @@ services:
       - --max-test-rows
       - ${TEST_MAX_ROWS:-0}
     profiles: ["tools"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PII_HASH_SALT: ${PII_HASH_SALT:?Run python scripts/bootstrap_env.py}
     restart: "no"
     volumes:
       - ./dataset:/data:ro
       - ./models:/models
       - ./src:/app/src:ro
       - ./ml:/app/ml:ro
+    depends_on:
+      dataset-check:
+        condition: service_completed_successfully
 
   dbt:
     image: lossguard-dbt:local

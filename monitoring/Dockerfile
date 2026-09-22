@@ -19,8 +19,10 @@ COPY src ./src
 COPY apps ./apps
 COPY ml ./ml
 COPY monitoring ./monitoring
+COPY maintenance ./maintenance
 RUN python -m pip install --no-build-isolation --no-deps -e . \
-    && chown -R lossguard:lossguard /app /home/lossguard
+    && mkdir -p /reports/drift \
+    && chown -R lossguard:lossguard /app /home/lossguard /reports
 
 USER 10001:10001
 

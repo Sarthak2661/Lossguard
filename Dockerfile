@@ -22,6 +22,7 @@ COPY src ./src
 COPY apps ./apps
 COPY ml ./ml
 COPY monitoring ./monitoring
+COPY maintenance ./maintenance
 COPY streamlit_app.py ./streamlit_app.py
 RUN python -m pip install --no-build-isolation --no-deps -e . \
     && chown -R lossguard:lossguard /app /home/lossguard

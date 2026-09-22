@@ -56,10 +56,12 @@ def bootstrap(output_path: Path, rotate: bool = False) -> None:
     postgres_port = values.get("POSTGRES_HOST_PORT", "55432")
     replacements["DATABASE_URL"] = (
         f"postgresql://{postgres_user}:{replacements['POSTGRES_PASSWORD']}"
-        f"@localhost:{postgres_port}/{postgres_db}"
+        f"@127.0.0.1:{postgres_port}/{postgres_db}"
     )
     output_path.write_text(replace_values(lines, replacements), encoding="utf-8")
     output_path.chmod(0o600)
+    report_dir = output_path.parent / "reports" / "drift"
+    report_dir.mkdir(parents=True, exist_ok=True)
     print(f"Generated protected local configuration at {output_path}")
 
 

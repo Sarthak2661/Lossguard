@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     scoring_api_url: str = "http://localhost:8000"
     scoring_api_max_attempts: int = Field(default=3, ge=1, le=10)
     scoring_api_retry_backoff_seconds: float = Field(default=0.5, ge=0, le=30)
+    postgres_pool_min_size: int = Field(default=1, ge=1, le=20)
+    postgres_pool_max_size: int = Field(default=8, ge=1, le=100)
+    consumer_write_batch_size: int = Field(default=100, ge=1, le=5000)
+    consumer_flush_seconds: float = Field(default=1.0, ge=0.05, le=60)
     dataset_path: str = "dataset/fraudTest.csv"
     replay_mode: str = "demo"
     replay_limit: int = 10_000

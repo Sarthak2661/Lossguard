@@ -15,6 +15,7 @@ COPY requirements/dbt.lock /tmp/dbt.lock
 RUN python -m pip install --require-hashes --no-deps -r /tmp/dbt.lock
 
 COPY --chown=lossguard:lossguard analytics/dbt /app/analytics/dbt
+RUN chown -R lossguard:lossguard /app/analytics/dbt
 
 USER 10001:10001
 

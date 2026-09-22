@@ -14,7 +14,8 @@ from confluent_kafka import Consumer
 from confluent_kafka.admin import AdminClient, NewTopic
 
 from apps.consumer.main import score_with_retry
-from lossguard.database import TransactionRepository
+from apps.outbox_publisher.main import publish_once
+from lossguard.database import OutboxRecord, TransactionRepository, WriteBatch
 from lossguard.features import source_row_to_event
 from lossguard.kafka import build_producer, publish_json
 from lossguard.schemas import ScoreResponse, TransactionEvent
@@ -27,6 +28,10 @@ pytestmark = [
         reason="set RUN_INTEGRATION_TESTS=1 with the core Compose dependencies running",
     ),
 ]
+
+
+def local_database_url() -> str:
+    return os.environ["DATABASE_URL"].replace("@localhost:", "@127.0.0.1:")
 
 
 def sample_event(transaction_id: str | None = None) -> TransactionEvent:
@@ -56,7 +61,7 @@ def sample_score(event: TransactionEvent) -> ScoreResponse:
 
 
 def test_kafka_publish_is_broker_confirmed_and_consumable() -> None:
-    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:19092")
+    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:19092")
     topic = f"lossguard.integration.{uuid.uuid4().hex}"
     admin = AdminClient({"bootstrap.servers": bootstrap_servers})
     admin.create_topics([NewTopic(topic, num_partitions=1, replication_factor=1)])[topic].result(10)
@@ -85,26 +90,60 @@ def test_kafka_publish_is_broker_confirmed_and_consumable() -> None:
 
 
 def test_postgres_duplicate_processing_is_idempotent() -> None:
-    database_url = os.environ["DATABASE_URL"]
+    database_url = local_database_url()
     transaction_id = f"integration-{uuid.uuid4().hex}"
     event = sample_event(transaction_id)
     score = sample_score(event)
     repository = TransactionRepository(database_url)
     try:
         repository.save_score(event, score)
-        repository.save_score(event, score)
+        updated_band = "high" if event.customer_ltv_band != "high" else "low"
+        updated_event = event.model_copy(update={"customer_ltv_band": updated_band})
+        repository.save_score(updated_event, score)
         with psycopg.connect(database_url) as connection:
-            count = connection.execute(
-                "SELECT count(*) FROM scored_transactions WHERE transaction_id = %s",
+            count, stored_band = connection.execute(
+                """
+                SELECT count(*), max(customer_ltv_band)
+                FROM scored_transactions
+                WHERE transaction_id = %s
+                """,
                 (transaction_id,),
-            ).fetchone()[0]
+            ).fetchone()
         assert count == 1
+        assert stored_band == updated_band
     finally:
+        repository.close()
         with psycopg.connect(database_url) as connection:
             connection.execute(
                 "DELETE FROM scored_transactions WHERE transaction_id = %s",
                 (transaction_id,),
             )
+
+
+def test_transactional_outbox_is_published_and_marked() -> None:
+    database_url = local_database_url()
+    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:19092")
+    dedupe_key = f"integration-outbox-{uuid.uuid4().hex}"
+    repository = TransactionRepository(database_url)
+    try:
+        repository.save_batch(
+            WriteBatch(
+                outbox=[
+                    OutboxRecord(dedupe_key, "txns.scored", dedupe_key, {"integration_test": True})
+                ]
+            )
+        )
+        assert publish_once(repository, build_producer(bootstrap_servers), 100) >= 1
+        with psycopg.connect(database_url) as connection:
+            published = connection.execute(
+                "SELECT published_at IS NOT NULL FROM kafka_outbox WHERE dedupe_key = %s",
+                (dedupe_key,),
+            ).fetchone()[0]
+        assert published
+    finally:
+        repository.close()
+        with psycopg.connect(database_url) as connection:
+            connection.execute("DELETE FROM kafka_outbox WHERE dedupe_key = %s", (dedupe_key,))
 
 
 def test_scoring_api_retries_transient_http_failures() -> None:
