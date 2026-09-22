@@ -24,15 +24,16 @@ Analysts can move the decision threshold and immediately see how the dollar trad
 1. A replay producer reads timestamped Sparkov transactions, removes direct identifiers, engineers
    model features, and publishes privacy-safe events to Redpanda.
 2. The consumer validates every event. Valid transactions continue to scoring; malformed records go
-   to a rejected topic and PostgreSQL dead-letter table.
+   to a sanitized PostgreSQL dead-letter table.
 3. FastAPI serves a checksum-verified XGBoost bundle. A separately fitted isotonic calibrator turns
    raw model scores into probabilities before cost calculations; the API returns the action,
    category-specific thresholds, expected costs, and SHAP feature contributions.
-4. Scored transactions are stored in PostgreSQL, while dbt builds tested daily and segment-level
-   business metrics.
-5. Streamlit presents the dollar impact, threshold simulation, segment comparison, model health,
+4. Scored/dead-letter rows, metrics, and Kafka outbox messages commit in one pooled PostgreSQL
+   transaction. A separate publisher delivers the outbox to Redpanda before marking it complete.
+5. dbt builds tested daily and segment-level business metrics from PostgreSQL.
+6. Streamlit presents the dollar impact, threshold simulation, segment comparison, model health,
    and transaction-level explanations.
-6. Prometheus and Grafana monitor throughput, lag, validation failures, and container health;
+7. Prometheus and Grafana monitor throughput, lag, validation failures, and container health;
    Evidently compares current feature distributions with the training reference.
 
 ## Dataset
@@ -71,10 +72,11 @@ flowchart LR
     Producer --> Raw["Redpanda: txns.raw"]
     Raw --> Consumer["Pydantic validation consumer"]
     Consumer --> API["FastAPI + XGBoost + SHAP"]
-    Consumer --> Rejected["txns.rejected + dead-letter table"]
+    Consumer --> Rejected["sanitized dead-letter table"]
     API --> Consumer
-    Consumer --> Scored["txns.scored"]
-    Consumer --> Postgres[(PostgreSQL)]
+    Consumer --> Postgres[("PostgreSQL + transactional outbox")]
+    Postgres --> Outbox["Outbox publisher"]
+    Outbox --> Scored["txns.scored / txns.rejected"]
     Postgres --> dbt["dbt staging + KPI marts"]
     dbt --> Streamlit["Streamlit business dashboard"]
     Redpanda --> Prometheus["Prometheus + cAdvisor"]
@@ -125,9 +127,12 @@ provides the shortest code-review path and local quality commands.
 ## Quick start
 
 Prerequisites: Docker Desktop 4.28.0 or newer with Linux containers enabled, Docker Compose v2.24.4
-or newer, at least 6 GB free memory, at least 6 GB free disk space, and both dataset CSV files in
-`dataset/`. Compose 2.24.4 is required for the optional `env_file.required` and multi-file overlay
-syntax used here. Commands below are run from the repository root. Confirm the installed versions:
+or newer, both dataset CSV files in `dataset/`, and about 15 GB of free disk space for images,
+build cache, and database growth. Allow 8 GB of Docker memory for a fresh model training run;
+a bounded replay with an existing model ran locally with about 4 GB, but that is not a training
+capacity guarantee. Compose 2.24.4 is required for the optional `env_file.required` and
+multi-file overlay syntax used here. Commands below are run from the repository root. Confirm the
+installed versions:
 
 ```powershell
 docker version
@@ -142,6 +147,8 @@ docker compose version
 Local services mount `src/`, `apps/`, and the dbt project so source changes are picked up without
 rebuilding the large ML image; `--build` still creates reproducible standalone images.
 Every published port is bound to `127.0.0.1`, so these services are not exposed on the LAN.
+On an existing database volume, the retention service runs immediately at startup and removes
+expired rows. Back up that volume first if you need to preserve records past the configured periods.
 
 ```powershell
 python scripts/bootstrap_env.py
@@ -184,9 +191,26 @@ docker compose -f docker-compose.yml -f docker-compose.observability.yml \
   --profile observability up -d
 ```
 
-The API starts before training, but `/health` clearly reports `development_heuristic`. Legacy or
-unsigned bundles are not loaded. Train the calibrated, checksum-protected artifact, reload the API,
-and replay a bounded test stream:
+Startup is dependency ordered: dataset checksum/schema validation runs first, `model-init` then
+verifies the checksum-protected bundle or trains it if absent, the scoring API becomes healthy,
+and only then do the consumer and replay producer start. This prevents heuristic scoring during an
+ordinary `docker compose up`. On a fresh installation, wait for the producer to exit successfully
+and for `TOTAL-LAG` to reach zero before building the dbt marts used by the dashboard:
+
+```powershell
+docker compose ps -a
+docker compose exec -T redpanda rpk -X brokers=redpanda:9092 group describe lossguard-scorers
+docker compose --profile tools run --rm dbt build --profiles-dir .
+```
+
+```bash
+docker compose ps -a
+docker compose exec -T redpanda rpk -X brokers=redpanda:9092 group describe lossguard-scorers
+docker compose --profile tools run --rm dbt build --profiles-dir .
+```
+
+To force a fresh training run, reload the new model, replay, and rebuild analytics after consumer
+lag returns to zero:
 
 ```powershell
 docker compose --profile tools run --rm trainer
@@ -212,9 +236,10 @@ Open:
 - Streamlit: <http://localhost:8501>
 - FastAPI docs: <http://localhost:8000/docs>
 - Redpanda Kafka listener: `localhost:19092`
-- PostgreSQL: `localhost:55432` (containers use `postgres:5432` internally)
-- Grafana pipeline health: <http://localhost:3000> (generated credentials are in the ignored `.env`)
-- Prometheus: <http://localhost:9090>
+- PostgreSQL: `127.0.0.1:55432` (containers use `postgres:5432` internally)
+- Grafana pipeline health: <http://localhost:3000> (only with the observability overlay; generated
+  credentials are in the ignored `.env`)
+- Prometheus: <http://localhost:9090> (only with the observability overlay)
 
 The default replay is limited to 10,000 test rows in `demo` mode. Demo mode compresses source time by
 720x, so roughly one source day plays in two minutes. Use `max` for throughput testing:
@@ -232,10 +257,11 @@ Replay timing can be selected with `REPLAY_MODE` or the producer's `--mode` flag
 | Mode | Timing |
 |---|---|
 | `demo` (default) | `max(actual_gap / 720, 0.001)` seconds |
-| `realtime` | Real source gap with a two-second cap and 0.001-second floor |
+| `realtime` | Historical event gaps replayed event-by-event, with a two-second cap and 0.001-second floor |
 | `max` | No artificial delay; broker and consumer throughput set the pace |
 
-The realtime two-second cap is a deliberate demo simplification: overnight or otherwise long source
+“Real-time” in this repository means event-by-event historical replay, not a live payment-provider
+feed. The two-second cap is a deliberate demo simplification: overnight or otherwise long source
 gaps do not stall a live walkthrough. For example, the CLI flag can override the environment:
 
 ```powershell
@@ -252,12 +278,21 @@ docker compose run --rm producer --mode realtime
 
 1. The producer reads the large CSV incrementally with `csv.DictReader`.
 2. It hashes the customer identifier and derives category, channel, margin, LTV band, age, and location.
-3. Replay timing follows the timestamp-sorted source in real time, 720x demo, or maximum-throughput mode.
+3. Replay timing follows source-row event gaps (negative gaps are floored to zero) in historical
+   realtime, 720x demo, or maximum-throughput mode.
 4. Pydantic validates the privacy-safe event before publication to `txns.raw`.
-5. The consumer validates again, calls the scorer, persists the decision, and publishes `txns.scored`.
-6. Invalid JSON/schema records go to PostgreSQL and `txns.rejected` as sanitized summaries. Scoring
-   dependency failures remain uncommitted for retry. Kafka output delivery is broker-confirmed before
-   the input offset commits, so processing is at-least-once and the scored table is idempotent by ID.
+5. The consumer validates again, calls the scorer, and accumulates bounded write batches using a
+   PostgreSQL connection pool.
+6. Each batch atomically commits scored rows or sanitized dead letters, metrics, and durable outbox
+   messages. Only then does the consumer commit source offsets.
+7. The outbox publisher broker-confirms `txns.scored`/`txns.rejected` delivery and marks each outbox
+   row published. A crash between broker acknowledgement and that mark may republish one event, so
+   delivery is explicitly at-least-once; database IDs and outbox dedupe keys are idempotent.
+
+The producer currently logs and skips source rows that fail its own validation, before they enter
+Kafka. The dead-letter table and `txns.rejected` topic cover malformed records consumed from
+`txns.raw`, not those skipped source rows. In a local 10,000-transaction replay, 121 underage source
+rows were skipped; the replay limit counts successfully published transactions.
 
 ### Cost-sensitive fraud scoring
 
@@ -357,6 +392,55 @@ bash scripts/verify_observability.sh
 6. Current rows are selected by `processed_at`, so replaying a different source slice naturally
    changes the rolling comparison even when transaction event dates are historical.
 
+The configuration bootstrap creates `reports/drift/` before Docker mounts it so the non-root
+monitor can persist artifacts. If an older checkout created that directory as root, repair it once
+with `docker compose run --rm --user 0 drift-monitor chown -R 10001:10001 /reports`, then restart
+`drift-monitor`.
+
+### Migrations and retention
+
+`schema-init` is now a checksum-validating migration runner over
+`infrastructure/postgres/migrations/`. Applied migration files are immutable and recorded in
+`schema_migrations`; changing an applied file stops startup instead of silently evolving a volume.
+The `retention` service runs once at startup and then daily by default. It deletes expired rows in
+bounded batches and removes only matching drift report artifacts. These deletions are not
+automatically recoverable; keep a PostgreSQL backup if older records matter.
+
+| Data | Default retention |
+|---|---:|
+| Scored transactions | 730 days |
+| Dead letters | 30 days |
+| Pipeline metrics | 90 days |
+| Drift rows and report files | 180 days |
+| Published Kafka outbox rows | 7 days |
+| Raw/scored Kafka records | 7 days |
+| Rejected Kafka summaries | 30 days |
+
+Database/report values use `RETENTION_*`; Kafka values use `KAFKA_*_RETENTION_MS` in `.env`.
+
+### Docker Desktop / WSL recovery
+
+First inspect state; these commands do not delete images, volumes, or data:
+
+```powershell
+docker info
+docker system df
+wsl --status
+wsl --list --verbose
+```
+
+```bash
+docker info
+docker system df
+```
+
+If Docker Desktop reports a missing WSL backend socket, quit Docker Desktop, run `wsl --shutdown`
+from PowerShell, reopen Docker Desktop, and re-enable the Ubuntu integration in **Settings →
+Resources → WSL integration**. Do not factory-reset Docker or delete volumes as a first recovery
+step. When disk pressure is only build cache, `docker builder prune --force` is safer than pruning
+volumes, but it will make the next image build slower. Keep at least 15 GB free for the split ML,
+runtime, monitoring, dbt, and test images plus dataset and database growth.
+
 Run a normal report or the documented in-memory shift acceptance demonstration:
 
 ```powershell
@@ -443,16 +527,20 @@ docker compose up -d --force-recreate dashboard
 ## Tests and quality checks
 
 ```powershell
-docker compose --profile tools run --rm test
-docker compose --profile tools run --rm lint
+docker compose --profile tools build test
+docker compose --profile tools run --rm --env-from-file .env test
+docker compose --profile tools run --rm test python -m ruff check .
+docker compose --profile tools run --rm test python -m ruff format --check .
 docker compose config --quiet
 docker compose -f docker-compose.yml -f docker-compose.observability.yml `
     --profile observability config --quiet
 ```
 
 ```bash
-docker compose --profile tools run --rm test
-docker compose --profile tools run --rm lint
+docker compose --profile tools build test
+docker compose --profile tools run --rm --env-from-file .env test
+docker compose --profile tools run --rm test python -m ruff check .
+docker compose --profile tools run --rm test python -m ruff format --check .
 docker compose config --quiet
 docker compose -f docker-compose.yml -f docker-compose.observability.yml \
   --profile observability config --quiet
@@ -462,6 +550,12 @@ The non-UI coverage gate is 75%, including branch coverage. GitHub Actions insta
 hash-locked test graph used by the test image and also starts real Redpanda
 and PostgreSQL dependencies for broker-confirmation, database idempotency, transient HTTP retry, and
 duplicate-processing integration tests.
+
+Local smoke check (2026-09-22, existing database volume and verified model artifact): the default
+10,000-event replay finished with 10,000 freshly scored rows, zero consumer lag, and no pending
+outbox messages. One deliberately malformed Kafka event produced a sanitized dead-letter row and a
+published `txns.rejected` message. dbt passed 19 of 19 checks; API health and the dashboard both
+returned HTTP 200. This check did not enable the optional privileged observability overlay.
 
 Verify dead-letter routing with one uniquely identified malformed event:
 
@@ -496,6 +590,7 @@ infrastructure/       PostgreSQL, Prometheus, and Grafana provisioning
 docker-compose.yml    lightweight core pipeline
 docker-compose.observability.yml  optional Prometheus/Grafana/cAdvisor overlay
 monitoring/           Evidently drift job, scheduler, and dedicated container
+maintenance/          bounded row/report retention scheduler
 requirements/         service-specific inputs and deterministic hash lockfiles
 docker/               dedicated trainer, dbt, and test image definitions
 ml/                   training data preparation and training entrypoint
@@ -530,6 +625,7 @@ not part of the current implementation and are not represented as live productio
 - SHA-256 verifies artifact integrity against its local sidecar, not publisher identity; production
   model promotion requires signed artifacts and a controlled registry.
 - The single-node broker/database and host-mounted development source are not production controls.
+- Source rows rejected by producer-side validation are logged and skipped, not dead-lettered.
 - Public deployment, payment-provider ingestion, delayed-label reconciliation, and independent
   model evaluation remain future work.
 

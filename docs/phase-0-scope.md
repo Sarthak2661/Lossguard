@@ -2,56 +2,70 @@
 
 ## Problem statement
 
-Fraud controls create two competing losses. Permissive controls approve fraudulent purchases and
-create chargeback losses; aggressive controls reject legitimate customers and destroy margin,
-trust, and future value. A conventional fraud model reports classification quality but does not
-answer the operating question: **which action has the lowest expected dollar cost for this
-transaction and merchant segment?**
+Fraud controls create two competing losses. Permissive controls approve fraudulent purchases;
+aggressive controls reject legitimate customers and destroy margin, trust, and future value. A
+classification score alone does not answer the operating question: **which action has the lowest
+expected dollar cost for this transaction and merchant segment?**
 
-LossGuard replays labelled Sparkov transactions as a live stream, scores each event, and recommends
-`approve`, `verify`, or `decline`. Category-specific thresholds are learned against a documented
-cost function. The resulting decision, expected cost, realized simulation cost, and feature-level
-explanation are stored for analysis. The dashboard translates model outputs into business outcomes:
-fraud captured, legitimate customers affected, estimated loss avoided, and the sensitivity of those
-outcomes to threshold changes.
+LossGuard replays labelled Sparkov transactions event-by-event, scores each event, and recommends
+`approve`, `verify`, or `decline`. Category thresholds are learned against a documented cost model.
+The resulting action, expected and retrospective simulated costs, model version, and feature-level
+explanation are stored for analysis. The dashboard translates them into fraud caught, fraud missed,
+legitimate-customer friction, normal approvals, and threshold sensitivity.
+
+“Real-time” here means source-order historical replay through a streaming architecture. LossGuard does
+not currently receive live card-network or payment-provider traffic, authorize a payment, or wait
+for delayed production dispute labels.
 
 ## Audience and decisions
 
 | Audience | Decision supported |
 |---|---|
-| Fraud operations | Which transactions need verification or decline? |
-| Commercial leadership | Is prevented fraud worth the customer friction introduced? |
-| Data/ML engineering | Is the stream valid, reproducible, and explainable? |
-| Portfolio reviewer | Can the builder connect infrastructure, modeling, and business value? |
+| Fraud operations | Which transactions should be approved, verified, or declined? |
+| Commercial leadership | Is simulated fraud reduction worth the modeled customer friction? |
+| Data/ML engineering | Is ingestion valid, replayable, observable, and explainable? |
+| Portfolio reviewer | Does the system connect infrastructure, modeling, reliability, and value? |
 
-## Phase 0–3 scope
+## Implemented scope
 
-- Local, Dockerized Redpanda and PostgreSQL platform.
-- Privacy-safe replay of the supplied Sparkov train/test CSV files.
-- Schema validation and dead-letter handling.
-- Cost-sensitive XGBoost scoring with per-category action thresholds.
-- FastAPI model service with SHAP explanations.
-- dbt models for consistent business KPIs.
-- Streamlit decision dashboard and threshold simulator.
+- Privacy-safe Sparkov replay through Redpanda and PostgreSQL.
+- Dataset checksum/schema validation, event validation, and sanitized dead letters.
+- Calibrated, cost-sensitive XGBoost scoring with per-category thresholds and SHAP.
+- Authenticated FastAPI scoring and administrative model reload.
+- dbt marts, Streamlit business dashboard, and plain-English explanation adapters.
+- Optional Prometheus/Grafana/cAdvisor observability and Slack alerts.
+- Scheduled Evidently drift reports with persisted error, freshness, and retention states.
+- Pooled/batched database persistence, versioned migrations, and a transactional Kafka outbox.
 
-## Success criteria
+## Success and reliability criteria
 
-1. Valid source rows become scored database records; invalid events remain inspectable.
-2. No direct card number, customer name, or street address enters Kafka, logs, or PostgreSQL.
-3. The scoring endpoint returns probabilities, one of three actions, cost estimates, and reasons.
-4. dbt marts reconcile transaction and decision counts to the scored source table.
-5. The dashboard states its source, freshness, simulation assumptions, and metric definitions.
+1. Dataset integrity and schema checks pass before training or replay begins.
+2. Valid events consumed from Kafka commit their decision, metric, and outbox record in one database
+   transaction; malformed Kafka events commit only a sanitized dead-letter summary and outbox record.
+3. Source offsets advance only after that database transaction commits.
+4. Kafka delivery is broker-confirmed. Delivery is at-least-once: a crash after acknowledgement but
+   before the outbox status update can republish an event, so downstream consumers must use the
+   stable transaction/outbox key for idempotency.
+5. No direct card number, customer name, street address, or raw malformed payload enters Kafka,
+   PostgreSQL, or application logs.
+6. Drift failures are visible as database health states; reports beyond the configured maximum age
+   are shown as stale rather than silently treated as healthy.
+7. Dollar values remain documented simulations, not realized merchant revenue.
 
 ## Interview pitch
 
-> I built a real-time fraud decision system that optimizes dollars, not accuracy alone. It streams
-> interpretable transaction data, protects customer identifiers, validates and scores each event,
-> and selects approve, verification, or decline thresholds separately for merchant categories. A
-> business dashboard then shows the trade-off between fraud avoided and legitimate-customer
-> friction, with transaction-level SHAP explanations so each recommendation is auditable.
+> I built a streaming fraud-decision simulator that optimizes a documented dollar-cost function,
+> not accuracy alone. It validates and replays privacy-safe historical events, serves calibrated
+> XGBoost decisions with SHAP evidence, persists them through a transactional outbox, and shows the
+> fraud-versus-customer-friction trade-off with observability, drift health, and retention controls.
 
-## Explicit non-goals through Phase 3
+## Explicit non-goals
 
-- Production card-processing integration, payment authorization, or automated customer action.
-- Claims that simulated cost savings are realized merchant revenue.
-- Phase 4 observability/Slack alerts, Phase 5 drift automation, or public deployment.
+- Live payment authorization, production payment-provider ingestion, or automated customer action.
+- Exactly-once delivery across PostgreSQL and Kafka; the implemented contract is durable,
+  idempotency-friendly at-least-once delivery.
+- Claims that retrospective simulated savings are realized revenue.
+- Multi-region broker/database availability, production IAM/TLS, or an audited model registry.
+- Delayed fraud-label reconciliation and independent production model validation.
+- Producer-side invalid source rows are logged and skipped before Kafka; routing them to a source
+  rejection store is not yet implemented.
