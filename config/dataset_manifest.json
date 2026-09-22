@@ -1,0 +1,14 @@
+{
+  "fraudTrain.csv": {
+    "rows": 1296675,
+    "min_timestamp": "2019-01-01 00:00:18",
+    "max_timestamp": "2020-06-21 12:13:37",
+    "sha256": "fd7139200dbfcbed0b6742bbe05a4f1abce532c4fef20918228a651647a3e75d"
+  },
+  "fraudTest.csv": {
+    "rows": 555719,
+    "min_timestamp": "2020-06-21 12:14:25",
+    "max_timestamp": "2020-12-31 23:59:34",
+    "sha256": "12d553ab19440c752d2531ee1af44bb64f12cc3d3839f1649f19e81c230545f0"
+  }
+}
