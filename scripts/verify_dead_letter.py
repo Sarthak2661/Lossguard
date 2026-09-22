@@ -78,7 +78,7 @@ def main() -> None:
     }
     print(json.dumps(result, indent=2))
     if not (result["dead_letter_table"] and found_topic_event and scored_rows == 0):
-        raise SystemExit("Phase 1 malformed-record acceptance failed")
+        raise SystemExit("Malformed-record routing check failed")
 
 
 if __name__ == "__main__":

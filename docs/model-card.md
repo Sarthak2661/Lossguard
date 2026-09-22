@@ -24,10 +24,8 @@ paired with its locally generated `.sha256` sidecar.
 
 ## Intended use
 
-This model supports a local portfolio simulation of approve, verify, and decline policies. It is
-appropriate for demonstrating calibrated cost-sensitive decision design, streaming model serving,
-explainability, and analytical reporting. It is not approved for payment authorization or customer
-treatment.
+This model supports local, retrospective analysis of approve, verify, and decline policies. It is
+not approved for payment authorization or customer treatment.
 
 ## Evaluation and reliability caveats
 

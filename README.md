@@ -235,7 +235,7 @@ keys or webhook URLs.
 - Historical fraud labels are available immediately in this synthetic replay. Real payment
   systems need delayed-label reconciliation, independent validation, signed model promotion,
   production IAM/TLS, fairness review, and capacity testing. A live provider webhook and a
-  current-dated simulator are [future work](docs/phase-0-scope.md), not present capabilities.
+  current-dated simulator are [future work](docs/scope.md), not present capabilities.
 
 If Docker Desktop's WSL integration fails, inspect `docker info`, `docker system df`, and
 `wsl --list --verbose` first. Quit Docker Desktop, run `wsl --shutdown` in PowerShell, reopen
@@ -270,7 +270,7 @@ PostgreSQL integration tests for retries, broker confirmation, and duplicate pro
 | `ml/`, `models/` | Training/evaluation and tracked metadata; generated model binary is ignored |
 | `analytics/dbt/` | Tested staging, daily, and segment KPI models |
 | `infrastructure/`, `monitoring/` | Migrations, Grafana/Prometheus, Evidently drift jobs |
-| `docs/` | [Scope](docs/phase-0-scope.md), [model card](docs/model-card.md), [business assumptions](docs/business-assumptions.md) |
+| `docs/` | [Scope](docs/scope.md), [model card](docs/model-card.md), [business assumptions](docs/business-assumptions.md) |
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for a review path and non-Docker setup. LossGuard is
 licensed under [MIT](LICENSE).

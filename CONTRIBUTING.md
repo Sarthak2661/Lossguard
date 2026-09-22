@@ -1,6 +1,6 @@
 # Contributing to LossGuard
 
-## Reviewer fast path
+## Code review guide
 
 Before reviewing model behavior or dollar claims, read:
 
@@ -10,7 +10,7 @@ Before reviewing model behavior or dollar claims, read:
   input used by the policy and dashboard.
 
 Then review `src/lossguard/costs.py`, `ml/train.py`, and `apps/scoring_api/model_service.py` before
-the UI. The project is a retrospective reference implementation, not a payment authorization system.
+the UI. LossGuard is a retrospective decision simulator, not a payment authorization system.
 
 ## Development setup
 

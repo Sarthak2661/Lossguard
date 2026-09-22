@@ -1,4 +1,4 @@
-# Phase 0 — Scope and decision framing
+# Scope and decision framing
 
 ## Problem statement
 
@@ -24,7 +24,6 @@ for delayed production dispute labels.
 | Fraud operations | Which transactions should be approved, verified, or declined? |
 | Commercial leadership | Is simulated fraud reduction worth the modeled customer friction? |
 | Data/ML engineering | Is ingestion valid, replayable, observable, and explainable? |
-| Portfolio reviewer | Does the system connect infrastructure, modeling, reliability, and value? |
 
 ## Implemented scope
 
@@ -51,13 +50,6 @@ for delayed production dispute labels.
 6. Drift failures are visible as database health states; reports beyond the configured maximum age
    are shown as stale rather than silently treated as healthy.
 7. Dollar values remain documented simulations, not realized merchant revenue.
-
-## Interview pitch
-
-> I built a streaming fraud-decision simulator that optimizes a documented dollar-cost function,
-> not accuracy alone. It validates and replays privacy-safe historical events, serves calibrated
-> XGBoost decisions with SHAP evidence, persists them through a transactional outbox, and shows the
-> fraud-versus-customer-friction trade-off with observability, drift health, and retention controls.
 
 ## Explicit non-goals
 

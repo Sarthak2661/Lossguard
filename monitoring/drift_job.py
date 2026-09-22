@@ -88,7 +88,7 @@ def load_current(config: DriftConfig) -> tuple[pd.DataFrame, datetime | None, da
 
 
 def simulate_distribution_shift(frame: pd.DataFrame) -> pd.DataFrame:
-    """Create an in-memory shift for the documented Phase 5 acceptance demonstration."""
+    """Create an in-memory feature shift for a drift-monitoring smoke test."""
     shifted = frame.copy()
     if "amount" in shifted:
         shifted["amount"] = shifted["amount"].astype(float) * 25 + 1000
